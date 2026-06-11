@@ -1,4 +1,3 @@
-// Entry point: load config, build the app, run one cleanup pass, then serve.
 import { createApp } from "./app";
 import { loadConfig } from "./config";
 
