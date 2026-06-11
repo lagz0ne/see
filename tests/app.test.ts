@@ -105,13 +105,82 @@ describe("static app share service", () => {
     expect(await script.text()).toContain("wrapped");
   });
 
-  test("rejects zip archives without an index entrypoint", async () => {
+  test("generates an index page for a zip without an index entrypoint", async () => {
     const { app } = await testApp();
-    const zip = makeZip([{ name: "assets/app.js", data: "console.log('no index')" }]);
+    const zip = makeZip([
+      { name: "app.js", data: "console.log('no index')" },
+      { name: "style.css", data: "body { color: red; }" },
+    ]);
 
-    const response = await uploadFile(app, new File([zip], "bad.zip", { type: "application/zip" }));
-    expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({ code: "missing_index" });
+    const response = await uploadFile(app, new File([zip], "noindex.zip", { type: "application/zip" }));
+    expect(response.status).toBe(201);
+    const payload = await response.json();
+    expect(payload.resources.map((resource: { path: string }) => resource.path)).toContain("index.html");
+
+    const index = await app.fetch(new Request(`http://share.test/content/${payload.id}/`));
+    expect(index.status).toBe(200);
+    const html = await index.text();
+    expect(html).toContain("generated automatically");
+    expect(html).toContain("app.js");
+    expect(html).toContain("style.css");
+
+    // The original files remain reachable.
+    const asset = await app.fetch(new Request(`http://share.test/content/${payload.id}/app.js`));
+    expect(asset.status).toBe(200);
+    expect(await asset.text()).toContain("no index");
+  });
+
+  test("generates an entry chooser for a zip with multiple html entries and no index", async () => {
+    const { app } = await testApp();
+    const zip = makeZip([
+      { name: "alpha.html", data: "<h1>Alpha</h1>" },
+      { name: "beta.html", data: "<h1>Beta</h1>" },
+    ]);
+
+    const response = await uploadFile(app, new File([zip], "multi.zip", { type: "application/zip" }));
+    expect(response.status).toBe(201);
+    const payload = await response.json();
+
+    const index = await app.fetch(new Request(`http://share.test/content/${payload.id}/`));
+    const html = await index.text();
+    expect(html).toContain("Entry points");
+    expect(html).toContain("alpha.html");
+    expect(html).toContain("beta.html");
+
+    const alpha = await app.fetch(new Request(`http://share.test/content/${payload.id}/alpha.html`));
+    expect(await alpha.text()).toContain("Alpha");
+  });
+
+  test("generates an index for multi-file uploads without an index", async () => {
+    const { app } = await testApp();
+    const response = await uploadFiles(app, [
+      new File(["<h1>One</h1>"], "one.html", { type: "text/html" }),
+      new File(["<h1>Two</h1>"], "two.html", { type: "text/html" }),
+    ]);
+
+    expect(response.status).toBe(201);
+    const payload = await response.json();
+    expect(payload.resources.map((resource: { path: string }) => resource.path)).toContain("index.html");
+
+    const index = await app.fetch(new Request(`http://share.test/content/${payload.id}/`));
+    const html = await index.text();
+    expect(html).toContain("one.html");
+    expect(html).toContain("two.html");
+  });
+
+  test("escapes hostile file names in the generated index", async () => {
+    const { app } = await testApp();
+    const zip = makeZip([
+      { name: "x<script>evil.js", data: "1" },
+      { name: "b.css", data: "2" },
+    ]);
+
+    const response = await uploadFile(app, new File([zip], "x.zip", { type: "application/zip" }));
+    const payload = await response.json();
+    const html = await (await app.fetch(new Request(`http://share.test/content/${payload.id}/`))).text();
+    // The hostile name must be HTML-escaped, never injected as raw markup.
+    expect(html).not.toContain("<script>evil");
+    expect(html).toContain("&lt;script&gt;evil");
   });
 
   test("rejects zip archives with path traversal", async () => {

@@ -4,6 +4,7 @@ import { Buffer } from "node:buffer";
 import type { AppConfig } from "./config";
 import { mimeTypeForPath } from "./mime";
 import { extractZipArtifact } from "./zip";
+import { renderGeneratedIndex } from "./generated-index";
 import { AppError, type ResourceInfo, type StoredArtifact, type UploadKind } from "./types";
 
 const HTML_EXTENSIONS = new Set([".html", ".htm"]);
@@ -66,7 +67,7 @@ export async function addOrReplaceResources(
   inputs: ResourceWriteInput[],
 ): Promise<ResourceWriteSummary> {
   const root = resolve(config.storageDir, storagePath);
-  return writeResourceFilesToRoot(config, root, inputs, { allowHtmlIndexFallback: false, requireIndex: false });
+  return writeResourceFilesToRoot(config, root, inputs, { allowHtmlIndexFallback: false });
 }
 
 export async function deleteResource(
@@ -201,12 +202,14 @@ async function storeInitialResourceSet(
   destination: string,
   uploadBytes: number,
 ): Promise<Omit<StoredArtifact, "id" | "storagePath">> {
-  const summary = await writeResourceFilesToRoot(
+  await writeResourceFilesToRoot(
     config,
     destination,
     files.map((file) => ({ file })),
-    { allowHtmlIndexFallback: true, requireIndex: true },
+    { allowHtmlIndexFallback: true },
   );
+  await ensureGeneratedIndex(destination);
+  const summary = await summarizeResourceList(await listResourcesAtRoot(destination));
   return {
     kind: "resources",
     sha256: summary.sha256,
@@ -215,6 +218,19 @@ async function storeInitialResourceSet(
     fileCount: summary.fileCount,
     resources: summary.resources,
   };
+}
+
+/**
+ * When an upload has no root `index.html`/`index.htm`, generate a landing page
+ * that links to every HTML entry point and lists all files, so the share stays
+ * viewable. A real index (uploaded or promoted) always wins.
+ */
+async function ensureGeneratedIndex(root: string): Promise<void> {
+  const resources = await listResourcesAtRoot(root);
+  if (resources.length === 0 || hasIndexResource(resources)) {
+    return;
+  }
+  await Bun.write(join(root, "index.html"), renderGeneratedIndex(resources));
 }
 
 async function storeHtml(bytes: Uint8Array, destination: string): Promise<void> {
@@ -230,13 +246,14 @@ async function storeZip(bytes: Uint8Array, destination: string, config: AppConfi
     maxPathDepth: config.maxPathDepth,
     maxExtractedFileBytes: config.maxExtractedFileBytes,
   });
+  await ensureGeneratedIndex(destination);
 }
 
 async function writeResourceFilesToRoot(
   config: AppConfig,
   root: string,
   inputs: ResourceWriteInput[],
-  options: { allowHtmlIndexFallback: boolean; requireIndex: boolean },
+  options: { allowHtmlIndexFallback: boolean },
 ): Promise<ResourceWriteSummary> {
   await mkdir(root, { recursive: true });
   const existing = await listResourcesAtRoot(root);
@@ -274,9 +291,6 @@ async function writeResourceFilesToRoot(
   }
 
   const resources = await listResourcesAtRoot(root);
-  if (options.requireIndex && !hasIndexResource(resources)) {
-    throw new AppError(400, "missing_index", "Resource uploads must include an index.html or index.htm file");
-  }
   return await summarizeResourceList(resources);
 }
 

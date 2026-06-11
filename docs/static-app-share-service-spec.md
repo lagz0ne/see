@@ -96,17 +96,25 @@ Accepted inputs:
   - stored as `index.html`
 - Multiple resource files:
   - stored relative to their submitted browser file paths or explicit API paths
-  - must result in an `index.html` or `index.htm`
-  - if exactly one non-index HTML file is submitted with other assets and no index file, it may be normalized to `index.html`
+  - if exactly one non-index HTML file is submitted with other assets and no index file, it is normalized to `index.html`
+  - if no `index.html`/`index.htm` results, a landing page is generated automatically (see "Generated index page")
 - Zip archive:
   - extension `.zip`
-  - must contain an `index.html` or `index.htm`
   - may contain JS, CSS, fonts, images, media, JSON, WASM, and other static assets
+  - an `index.html`/`index.htm` is preferred but not required; one is generated when absent
 
 Zip root normalization:
 
 - If `index.html` exists at archive root, use archive root.
-- If the archive has exactly one top-level directory and that directory contains `index.html`, strip the top-level directory.
+- If the archive has exactly one top-level directory and no root-level files, strip that top-level directory.
+
+Generated index page:
+
+- If, after extraction/normalization, a share has no root `index.html`/`index.htm`,
+  a landing page is generated at `index.html`. It links to every HTML entry point
+  (acting as a chooser when there are several) and lists all files. A real
+  `index.html` (uploaded later or promoted from a single HTML file) always wins.
+- An empty zip (no files) is still rejected (`empty_archive`).
 - Otherwise reject the upload with a clear error.
 
 Default limits:

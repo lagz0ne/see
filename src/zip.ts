@@ -35,7 +35,7 @@ export async function extractZipArtifact(bytes: Uint8Array, destination: string,
   const entries = parseCentralDirectory(bytes, limits);
   const files = entries.filter((entry) => !entry.isDirectory);
   if (files.length === 0) {
-    throw new AppError(400, "missing_index", "Zip archive must contain an index.html or index.htm file");
+    throw new AppError(400, "empty_archive", "Zip archive does not contain any files");
   }
 
   const prefix = chooseRootPrefix(files);
@@ -78,10 +78,6 @@ export async function extractZipArtifact(bytes: Uint8Array, destination: string,
     const finalPath = join(destination, outputPath);
     await mkdir(dirname(finalPath), { recursive: true });
     await Bun.write(finalPath, copyBytes(content));
-  }
-
-  if (!seen.has("index.html") && !seen.has("index.htm")) {
-    throw new AppError(400, "missing_index", "Zip archive must contain an index.html or index.htm file");
   }
 
   return { extractedBytes, fileCount };
@@ -234,14 +230,15 @@ function chooseRootPrefix(files: ZipEntry[]): string {
     }
   }
 
+  // A single wrapper directory with no root-level files: strip it so the
+  // archive's real contents sit at the share root (whether or not it has an
+  // index — a generated index page is added later when none is present).
   if (topLevels.size === 1 && !hasRootFile) {
     const [topLevel] = [...topLevels];
-    if (lowerPaths.includes(`${topLevel.toLowerCase()}/index.html`) || lowerPaths.includes(`${topLevel.toLowerCase()}/index.htm`)) {
-      return `${topLevel}/`;
-    }
+    return `${topLevel}/`;
   }
 
-  throw new AppError(400, "missing_index", "Zip archive must contain index.html at the root or inside one top-level directory");
+  return "";
 }
 
 function inflateEntry(bytes: Uint8Array, entry: ZipEntry): Uint8Array {
