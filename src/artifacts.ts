@@ -5,6 +5,7 @@ import type { AppConfig } from "./config";
 import { mimeTypeForPath } from "./mime";
 import { extractZipArtifact } from "./zip";
 import { renderGeneratedIndex } from "./generated-index";
+import { copyBytes } from "./lib/bytes";
 import { AppError, type ResourceInfo, type StoredArtifact, type UploadKind } from "./types";
 
 const HTML_EXTENSIONS = new Set([".html", ".htm"]);
@@ -150,8 +151,7 @@ export async function sha256Text(value: string): Promise<string> {
 }
 
 export async function sha256Bytes(bytes: Uint8Array): Promise<string> {
-  const digestInput = copyBytes(bytes);
-  const digest = await crypto.subtle.digest("SHA-256", digestInput);
+  const digest = await crypto.subtle.digest("SHA-256", copyBytes(bytes));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
@@ -220,11 +220,7 @@ async function storeInitialResourceSet(
   };
 }
 
-/**
- * When an upload has no root `index.html`/`index.htm`, generate a landing page
- * that links to every HTML entry point and lists all files, so the share stays
- * viewable. A real index (uploaded or promoted) always wins.
- */
+// Generate a fallback index page when an upload has no index.html (a real index always wins).
 async function ensureGeneratedIndex(root: string): Promise<void> {
   const resources = await listResourcesAtRoot(root);
   if (resources.length === 0 || hasIndexResource(resources)) {
@@ -452,8 +448,3 @@ function randomBase64Url(byteLength: number): string {
   return Buffer.from(bytes).toString("base64url");
 }
 
-function copyBytes(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
-  const copy = new Uint8Array(bytes.byteLength);
-  copy.set(bytes);
-  return copy;
-}

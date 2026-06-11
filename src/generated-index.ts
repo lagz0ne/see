@@ -1,4 +1,5 @@
 import type { ResourceInfo } from "./types";
+import { escapeHtml } from "./lib/html";
 
 const HTML_ENTRY_PATTERN = /\.(html?|htm)$/i;
 
@@ -6,14 +7,7 @@ export function isHtmlEntry(path: string): boolean {
   return HTML_ENTRY_PATTERN.test(path);
 }
 
-/**
- * Build a standalone landing page for an upload that has no `index.html`.
- *
- * Used when a ZIP or multi-file upload either contains no entry point or has
- * several possible entries: instead of rejecting the upload, we generate an
- * index that links to each HTML entry point and lists every file, so the
- * share is still viewable.
- */
+// Standalone landing page for an upload with no index.html: links each HTML entry, lists all files.
 export function renderGeneratedIndex(resources: ResourceInfo[], title?: string): string {
   const heading = (title && title.trim()) || "Uploaded app";
   const entries = resources.filter((resource) => isHtmlEntry(resource.path));
@@ -140,15 +134,6 @@ export function renderGeneratedIndex(resources: ResourceInfo[], title?: string):
 </body>
 </html>
 `;
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
 }
 
 function encodePath(path: string): string {

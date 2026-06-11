@@ -2,6 +2,7 @@ import type { AppConfig } from "./config";
 import type { UploadRecord } from "./types";
 import { uploadRevision } from "./upload-metadata";
 import { contentFrameSrc, viewerUrl } from "./urls";
+import { escapeHtml } from "./lib/html";
 
 const ASSET_VERSION = "20260611-clean-neutral";
 
@@ -132,15 +133,6 @@ function htmlDocument(title: string, body: string): string {
     ${body}
   </body>
 </html>`;
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
 }
 
 function escapeAttr(value: string): string {

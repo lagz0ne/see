@@ -1316,7 +1316,7 @@ function saveToken(token: string): void {
   try {
     localStorage.setItem(TOKEN_STORAGE_KEY, token);
   } catch {
-    // Uploads can continue if browser storage is unavailable.
+    // Ignore storage failures.
   }
 }
 
@@ -1340,7 +1340,7 @@ function saveViewerChromeVisible(value: boolean): void {
   try {
     localStorage.setItem(VIEWER_CHROME_STORAGE_KEY, value ? "true" : "false");
   } catch {
-    // The viewer should remain usable if browser storage is unavailable.
+    // Ignore storage failures.
   }
 }
 

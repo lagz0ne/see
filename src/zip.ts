@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { AppError } from "./types";
+import { copyBytes } from "./lib/bytes";
 
 export type ZipLimits = {
   maxExtractedBytes: number;
@@ -230,9 +231,7 @@ function chooseRootPrefix(files: ZipEntry[]): string {
     }
   }
 
-  // A single wrapper directory with no root-level files: strip it so the
-  // archive's real contents sit at the share root (whether or not it has an
-  // index — a generated index page is added later when none is present).
+  // Single wrapper directory with no root-level files: strip it so contents sit at the root.
   if (topLevels.size === 1 && !hasRootFile) {
     const [topLevel] = [...topLevels];
     return `${topLevel}/`;
@@ -268,8 +267,3 @@ function inflateEntry(bytes: Uint8Array, entry: ZipEntry): Uint8Array {
   }
 }
 
-function copyBytes(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
-  const copy = new Uint8Array(bytes.byteLength);
-  copy.set(bytes);
-  return copy;
-}
