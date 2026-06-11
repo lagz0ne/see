@@ -3,7 +3,7 @@ import type { UploadRecord } from "./types";
 import { uploadRevision } from "./upload-metadata";
 import { contentFrameSrc, viewerUrl } from "./urls";
 
-const ASSET_VERSION = "20260611-vibrant-ui";
+const ASSET_VERSION = "20260611-clean-neutral";
 
 export function uploadPage(config: AppConfig): string {
   return htmlDocument(

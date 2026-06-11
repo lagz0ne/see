@@ -240,8 +240,8 @@ function UploadApp({ root }: StaticShareAppProps) {
         <div className="grid w-full gap-6 lg:grid-cols-[minmax(0,0.8fr)_minmax(460px,0.9fr)] lg:items-center">
           <section className="flex flex-col gap-6">
             <div className="flex items-center gap-3">
-              <div className="grid size-11 place-items-center rounded-xl gradient-surface shadow-lg shadow-primary/30">
-                <FileArchiveIcon data-icon="inline-start" className="text-white" />
+              <div className="grid size-11 place-items-center rounded-xl bg-primary text-primary-foreground shadow-sm">
+                <FileArchiveIcon data-icon="inline-start" />
               </div>
               <p className="text-xs font-semibold tracking-[0.18em] text-muted-foreground uppercase">
                 Static App Share
@@ -250,7 +250,7 @@ function UploadApp({ root }: StaticShareAppProps) {
             <div className="flex flex-col gap-3">
               <h1 className="text-4xl font-bold tracking-tight text-balance sm:text-5xl">
                 Ship a static app{" "}
-                <span className="text-gradient">in seconds.</span>
+                <span className="text-muted-foreground">in seconds.</span>
               </h1>
               <p className="max-w-md text-base text-muted-foreground text-pretty">
                 Drop an HTML file, a ZIP, or a folder of static resources and get a
@@ -266,7 +266,7 @@ function UploadApp({ root }: StaticShareAppProps) {
             </div>
           </section>
 
-          <Card className="brand-glow glass w-full shadow-2xl shadow-primary/10 ring-0">
+          <Card className="w-full shadow-sm">
             <CardHeader>
               <CardTitle className="text-lg">New share</CardTitle>
               <CardDescription>HTML, ZIP, or static resources</CardDescription>
@@ -322,7 +322,7 @@ function UploadApp({ root }: StaticShareAppProps) {
                       <div
                         className={cn(
                           "grid size-11 place-items-center rounded-full transition-colors",
-                          files.length > 0 ? "gradient-surface text-white" : "bg-primary/10 text-primary",
+                          files.length > 0 ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground",
                         )}
                       >
                         {files.length > 0 ? (
@@ -423,7 +423,7 @@ function UploadApp({ root }: StaticShareAppProps) {
                     type="submit"
                     size="lg"
                     disabled={isUploading}
-                    className="gradient-surface h-11 w-full border-0 text-base font-semibold text-white shadow-lg shadow-primary/30 transition-transform hover:brightness-110 hover:shadow-primary/40 active:scale-[0.99]"
+                    className="h-11 w-full text-base font-semibold"
                   >
                     <UploadCloudIcon data-icon="inline-start" />
                     {isUploading ? "Uploading…" : "Upload & get link"}
@@ -462,7 +462,7 @@ function UploadApp({ root }: StaticShareAppProps) {
                     </Button>
                   </div>
                 </Field>
-                <Button asChild className="gradient-surface border-0 text-white shadow-md shadow-primary/25 hover:brightness-110">
+                <Button asChild variant="secondary">
                   <a href={result.viewerUrl} target="_blank" rel="noreferrer">
                     <ExternalLinkIcon data-icon="inline-start" />
                     Open viewer
@@ -645,10 +645,10 @@ function ViewerApp({ root }: StaticShareAppProps) {
   return (
     <main className="relative flex h-screen min-h-screen flex-col overflow-hidden bg-background">
       {controlsVisible ? (
-        <header className="glass flex min-h-12 shrink-0 items-center gap-2 border-b px-2 py-1.5 md:px-3">
+        <header className="flex min-h-12 shrink-0 items-center gap-2 border-b bg-card/95 px-2 py-1.5 backdrop-blur md:px-3">
           <div className="flex min-w-0 flex-1 items-center gap-2.5">
-            <div className="grid size-8 shrink-0 place-items-center rounded-lg gradient-surface shadow-sm shadow-primary/30">
-              <LinkIcon data-icon="inline-start" className="text-white" />
+            <div className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary text-primary-foreground">
+              <LinkIcon data-icon="inline-start" />
             </div>
             <div className="min-w-0">
               <p className="sr-only">Static App Share</p>

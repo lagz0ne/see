@@ -22,6 +22,17 @@ design source of truth (API surface, storage model, two-origin security model).
   separate content origin and keep the viewer iframe sandbox without `allow-same-origin`.
   Don't loosen the viewer CSP.
 
+## Skills
+
+This project ships a pinned **shadcn** skill (via `bunx skills`, tracked in `skills-lock.json`),
+installed for both Claude Code and Codex. After a fresh clone, restore it with:
+
+```bash
+bunx skills experimental_install   # or: bunx skills add shadcn/ui --agent '*' -y
+```
+
+Use the shadcn skill for all UI/component work instead of hand-writing markup.
+
 ## shadcn/ui
 
 - Use `bunx --bun shadcn@latest ...` for the shadcn CLI.
