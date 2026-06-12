@@ -15,6 +15,7 @@ import {
   RefreshCcwIcon,
   RotateCwIcon,
   Settings2Icon,
+  SettingsIcon,
   SunIcon,
   Trash2Icon,
   UploadCloudIcon,
@@ -70,6 +71,7 @@ import { CapturePreview } from "./inspector/CapturePreview";
 import { InspectOverlay, type Selection } from "./inspector/InspectOverlay";
 import { CaptureError, type CaptureResult, DisplayCapture, contentRectToParentRect, supportsDisplayCapture } from "./inspector/captureSelection";
 import { useInspectChannel } from "./inspector/useInspectChannel";
+import { SettingsPanel } from "./settings/SettingsPanel";
 
 type StaticShareAppProps = {
   root: HTMLElement;
@@ -87,7 +89,7 @@ type UploadPayload = {
   expiresAt: string;
 };
 
-type ResourceInfo = {
+export type ResourceInfo = {
   path: string;
   bytes: number;
   sha256: string;
@@ -95,7 +97,7 @@ type ResourceInfo = {
   contentType: string;
 };
 
-type ResourcePayload = {
+export type ResourcePayload = {
   id: string;
   revision: number;
   contentRoot: string;
@@ -510,6 +512,15 @@ const VIEWPORT_PRESETS = {
 type PresetKey = keyof typeof VIEWPORT_PRESETS | "custom";
 type ZoomMode = "fit" | "50" | "75" | "100" | "125" | "custom";
 
+type UploadSettings = {
+  id: string;
+  passwordRequired: boolean;
+  homepage: string | null;
+  exposed: string[];
+  barDefault: boolean;
+  htmlPages: string[];
+};
+
 function ViewerApp({ root }: StaticShareAppProps) {
   const uploadId = root.dataset.uploadId || "";
   const viewerUrl = root.dataset.viewerUrl || window.location.href;
@@ -517,6 +528,14 @@ function ViewerApp({ root }: StaticShareAppProps) {
   const title = root.dataset.title || "Uploaded app";
   const initialContentUrl = root.dataset.contentUrl || "";
   const initialRevision = Number(root.dataset.resourceRevision || 1);
+  const barDefaultAttr = root.dataset.barDefault !== "false";
+  // contentRoot: everything up to and including the last "/", stripped of query string
+  const contentRoot = useMemo(() => {
+    const base = initialContentUrl.split("?")[0];
+    const lastSlash = base.lastIndexOf("/");
+    return lastSlash >= 0 ? base.slice(0, lastSlash + 1) : base + "/";
+  }, [initialContentUrl]);
+
   const stageRef = useRef<HTMLElement | null>(null);
   const [stageSize, setStageSize] = useState({ width: 1024, height: 720 });
   const [preset, setPreset] = useState<PresetKey>("mobile-portrait");
@@ -533,7 +552,11 @@ function ViewerApp({ root }: StaticShareAppProps) {
   const [resourceRevision, setResourceRevision] = useState(initialRevision);
   const [frameSrc, setFrameSrc] = useState(initialContentUrl);
   const [copied, setCopied] = useState(false);
-  const [controlsVisible, setControlsVisible] = useState(readViewerChromeVisible);
+  const [controlsVisible, setControlsVisible] = useState(() => readViewerChromeVisible(barDefaultAttr));
+
+  // Settings state fetched on mount
+  const [uploadSettings, setUploadSettings] = useState<UploadSettings | null>(null);
+  const [currentPage, setCurrentPage] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const contentOrigin = root.dataset.contentOrigin || window.location.origin;
   const { granted, targets, enableInspect, disableInspect } = useInspectChannel(iframeRef, contentOrigin);
@@ -644,6 +667,45 @@ function ViewerApp({ root }: StaticShareAppProps) {
     };
   }, []);
 
+  // Fetch settings once on mount
+  useEffect(() => {
+    if (!uploadId) return;
+    void fetch(`/api/uploads/${uploadId}/settings`, { cache: "no-store" })
+      .then(async (res) => {
+        const data = await res.json().catch(() => null);
+        if (res.ok && data) {
+          setUploadSettings(data as UploadSettings);
+          setCurrentPage((data as UploadSettings).homepage ?? null);
+        }
+      })
+      .catch(() => {
+        // silently ignore — settings fetch is best-effort
+      });
+  }, [uploadId]);
+
+  // Build the list of navigable pages: unique of [homepage, ...exposed]
+  const navigablePages = useMemo<string[]>(() => {
+    if (!uploadSettings) return [];
+    const seen = new Set<string>();
+    const result: string[] = [];
+    if (uploadSettings.homepage) {
+      seen.add(uploadSettings.homepage);
+      result.push(uploadSettings.homepage);
+    }
+    for (const page of uploadSettings.exposed) {
+      if (!seen.has(page)) {
+        seen.add(page);
+        result.push(page);
+      }
+    }
+    return result;
+  }, [uploadSettings]);
+
+  function navigateToPage(page: string) {
+    setCurrentPage(page);
+    setFrameSrc(`${contentRoot}${page}?v=${resourceRevision}&t=${Date.now()}`);
+  }
+
   const frameMetrics = useMemo(() => {
     const stageInset = controlsVisible ? 32 : 16;
     const availableWidth = Math.max(240, stageSize.width - stageInset);
@@ -750,6 +812,23 @@ function ViewerApp({ root }: StaticShareAppProps) {
           <Badge variant="outline" className="hidden shrink-0 font-mono tabular-nums lg:inline-flex">
             REV {resourceRevision}
           </Badge>
+
+          {navigablePages.length >= 2 ? (
+            <Select value={currentPage ?? ""} onValueChange={navigateToPage}>
+              <SelectTrigger size="sm" className="h-7 max-w-[12rem] shrink-0 font-mono text-xs" aria-label="Navigate page">
+                <SelectValue placeholder="Page" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {navigablePages.map((page) => (
+                    <SelectItem key={page} value={page} className="font-mono text-xs">
+                      {page}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          ) : null}
 
           <div className="flex shrink-0 items-center gap-1">
             {inspectAvailable ? (
@@ -891,6 +970,37 @@ function ViewerApp({ root }: StaticShareAppProps) {
                 />
               </PopoverContent>
             </Popover>
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button variant="outline" size="icon-sm" aria-label="Workspace settings">
+                  <SettingsIcon data-icon="inline-start" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="end" className="w-[min(calc(100vw-1rem),34rem)] gap-3 overflow-y-auto p-3" style={{ maxHeight: "min(80vh, 640px)" }}>
+                <PopoverHeader>
+                  <PopoverTitle>Settings</PopoverTitle>
+                  <PopoverDescription>Workspace configuration</PopoverDescription>
+                </PopoverHeader>
+                <SettingsPanel
+                  uploadId={uploadId}
+                  contentRoot={contentRoot}
+                  resourceRevision={resourceRevision}
+                  onHomeChanged={() => {
+                    // re-fetch settings and navigate to the new homepage
+                    void fetch(`/api/uploads/${uploadId}/settings`, { cache: "no-store" })
+                      .then(async (res) => {
+                        const data = await res.json().catch(() => null);
+                        if (res.ok && data) {
+                          setUploadSettings(data as UploadSettings);
+                          const hp = (data as UploadSettings).homepage;
+                          if (hp) navigateToPage(hp);
+                        }
+                      })
+                      .catch(() => undefined);
+                  }}
+                />
+              </PopoverContent>
+            </Popover>
             <TooltipButton label={copied ? "Copied" : "Copy link"} variant="outline" size="icon-sm" onClick={copyViewer}>
               <CopyIcon data-icon="inline-start" />
             </TooltipButton>
@@ -1004,7 +1114,7 @@ function ViewerApp({ root }: StaticShareAppProps) {
   );
 }
 
-function ResourceManager({
+export function ResourceManager({
   uploadId,
   initialResources,
   initialRevision,
@@ -1453,11 +1563,13 @@ function forgetToken(): void {
   }
 }
 
-function readViewerChromeVisible(): boolean {
+function readViewerChromeVisible(defaultVisible = true): boolean {
   try {
-    return localStorage.getItem(VIEWER_CHROME_STORAGE_KEY) !== "false";
+    const stored = localStorage.getItem(VIEWER_CHROME_STORAGE_KEY);
+    if (stored === null) return defaultVisible;
+    return stored !== "false";
   } catch {
-    return true;
+    return defaultVisible;
   }
 }
 

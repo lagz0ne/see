@@ -416,6 +416,155 @@ describe("static app share service", () => {
     const viewer = await app.fetch(new Request(payload.viewerUrl));
     expect(await viewer.text()).toContain('data-content-origin="http://content.test"');
   });
+
+  test("GET /api/uploads/:id/settings returns defaults for a password-protected upload", async () => {
+    const { app } = await testApp();
+    const response = await uploadFile(app, new File(["<h1>Settings</h1>"], "index.html", { type: "text/html" }), {
+      editToken: "pw",
+    });
+    expect(response.status).toBe(201);
+    const payload = await response.json();
+
+    const settings = await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/settings`));
+    expect(settings.status).toBe(200);
+    const body = await settings.json();
+    expect(body.passwordRequired).toBe(true);
+    expect(body.homepage).toBe(null);
+    expect(body.exposed).toEqual([]);
+    expect(body.barDefault).toBe(true);
+    expect(body.htmlPages).toContain("index.html");
+  });
+
+  test("PATCH settings requires auth when password is set, succeeds with correct token", async () => {
+    const { app } = await testApp();
+    const response = await uploadFile(app, new File(["<h1>pw</h1>"], "index.html", { type: "text/html" }), {
+      editToken: "pw",
+    });
+    expect(response.status).toBe(201);
+    const payload = await response.json();
+
+    // Rejected without auth
+    const rejected = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/settings`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ barDefault: false }),
+      }),
+    );
+    expect(rejected.status).toBe(401);
+
+    // Succeeds with correct auth
+    const patched = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/settings`, {
+        method: "PATCH",
+        headers: { authorization: "Bearer pw", "content-type": "application/json" },
+        body: JSON.stringify({ homepage: "index.html", exposed: ["index.html"], barDefault: false }),
+      }),
+    );
+    expect(patched.status).toBe(200);
+    const patchBody = await patched.json();
+    expect(patchBody.homepage).toBe("index.html");
+    expect(patchBody.exposed).toEqual(["index.html"]);
+    expect(patchBody.barDefault).toBe(false);
+
+    // Subsequent GET reflects the changes
+    const settings = await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/settings`));
+    expect(settings.status).toBe(200);
+    const settingsBody = await settings.json();
+    expect(settingsBody.homepage).toBe("index.html");
+    expect(settingsBody.exposed).toEqual(["index.html"]);
+    expect(settingsBody.barDefault).toBe(false);
+  });
+
+  test("PATCH settings with password:'' clears password and allows unauthenticated edits", async () => {
+    const { app } = await testApp();
+    const response = await uploadFile(app, new File(["<h1>clear pw</h1>"], "index.html", { type: "text/html" }), {
+      editToken: "oldpw",
+    });
+    expect(response.status).toBe(201);
+    const payload = await response.json();
+
+    // Clear the password
+    const cleared = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/settings`, {
+        method: "PATCH",
+        headers: { authorization: "Bearer oldpw", "content-type": "application/json" },
+        body: JSON.stringify({ password: "" }),
+      }),
+    );
+    expect(cleared.status).toBe(200);
+
+    // GET now shows passwordRequired:false
+    const settings = await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/settings`));
+    const settingsBody = await settings.json();
+    expect(settingsBody.passwordRequired).toBe(false);
+
+    // PATCH without auth now succeeds (public edit)
+    const noAuth = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/settings`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ barDefault: false }),
+      }),
+    );
+    expect(noAuth.status).toBe(200);
+    expect((await noAuth.json()).barDefault).toBe(false);
+  });
+
+  test("homepage serving: PATCH homepage redirects root content request to the specified page", async () => {
+    const { app } = await testApp();
+    const response = await uploadFiles(app, [
+      new File(["<h1>Index</h1>"], "index.html", { type: "text/html" }),
+      new File(["<h1>About</h1>"], "about.html", { type: "text/html" }),
+    ]);
+    expect(response.status).toBe(201);
+    const payload = await response.json();
+
+    // Set homepage to about.html
+    const patched = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/settings`, {
+        method: "PATCH",
+        headers: { authorization: `Bearer ${payload.editToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ homepage: "about.html" }),
+      }),
+    );
+    expect(patched.status).toBe(200);
+
+    // GET /content/:id/ should now serve about.html content
+    const content = await app.fetch(new Request(`http://share.test/content/${payload.id}/`));
+    expect(content.status).toBe(200);
+    expect(await content.text()).toContain("About");
+  });
+
+  test("PATCH settings rejects homepage that is not an existing HTML page", async () => {
+    const { app } = await testApp();
+    const response = await uploadFile(app, new File(["<h1>x</h1>"], "index.html", { type: "text/html" }), {
+      editToken: "pw",
+    });
+    expect(response.status).toBe(201);
+    const payload = await response.json();
+
+    const rejected = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/settings`, {
+        method: "PATCH",
+        headers: { authorization: "Bearer pw", "content-type": "application/json" },
+        body: JSON.stringify({ homepage: "notexist.html" }),
+      }),
+    );
+    expect(rejected.status).toBe(400);
+    expect(await rejected.json()).toMatchObject({ code: "invalid_setting" });
+  });
+
+  test("viewer page HTML contains data-bar-default='true' by default", async () => {
+    const { app } = await testApp();
+    const payload = await (
+      await uploadFile(app, new File(["<h1>bar</h1>"], "index.html", { type: "text/html" }))
+    ).json();
+
+    const viewer = await app.fetch(new Request(payload.viewerUrl));
+    expect(viewer.status).toBe(200);
+    expect(await viewer.text()).toContain('data-bar-default="true"');
+  });
 });
 
 async function testApp(env: Record<string, string> = {}): Promise<{ app: StaticShareApp; dir: string; config: AppConfig }> {

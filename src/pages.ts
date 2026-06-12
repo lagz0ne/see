@@ -1,10 +1,10 @@
 import type { AppConfig } from "./config";
 import type { UploadRecord } from "./types";
-import { uploadRevision } from "./upload-metadata";
+import { uploadRevision, uploadWorkspace } from "./upload-metadata";
 import { contentFrameSrc, contentOrigin, viewerUrl } from "./urls";
 import { escapeHtml } from "./lib/html";
 
-const ASSET_VERSION = "20260612-inspect";
+const ASSET_VERSION = "20260612-workspace";
 
 export function uploadPage(config: AppConfig): string {
   return htmlDocument(
@@ -34,6 +34,7 @@ export function viewerPage(config: AppConfig, upload: UploadRecord): string {
   // Origin the uploaded content is served from — the client validates inspector postMessages
   // against it. When content shares the public host, it is the public origin.
   const expectedContentOrigin = contentOrigin(config) ?? new URL(config.publicBaseUrl).origin;
+  const barDefault = uploadWorkspace(upload).barDefault ?? true;
 
   return htmlDocument(
     `${title} - Static App Share`,
@@ -56,6 +57,7 @@ export function viewerPage(config: AppConfig, upload: UploadRecord): string {
           data-viewer-url="${escapeAttr(link)}"
           data-expires-at="${escapeAttr(upload.expiresAt)}"
           data-resource-revision="${escapeAttr(String(revision))}"
+          data-bar-default="${barDefault ? "true" : "false"}"
         >
           <noscript>
             <iframe

@@ -153,6 +153,12 @@ export class UploadsRepository {
       .run(values.sha256, values.extractedBytes, values.fileCount, values.metadataJson, id);
   }
 
+  updateMetadata(id: string, metadataJson: string): void {
+    this.db
+      .query("UPDATE uploads SET metadata_json = ? WHERE id = ? AND status = 'ready'")
+      .run(metadataJson, id);
+  }
+
 
   expiredForCleanup(nowIso: string): UploadRecord[] {
     const rows = this.db

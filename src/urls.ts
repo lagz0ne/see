@@ -11,8 +11,15 @@ export function contentRootUrl(config: AppConfig, id: string): string {
   return withPath(config.publicBaseUrl, `/content/${id}/`);
 }
 
-export function contentFrameSrc(config: AppConfig, id: string, revision?: number): string {
-  const url = new URL(contentRootUrl(config, id));
+export function contentFrameSrc(config: AppConfig, id: string, revision?: number, page?: string): string {
+  const base = contentRootUrl(config, id);
+  const url = new URL(base);
+  if (page && page.length > 0) {
+    // Append page segments to the content root path, URL-encoding each segment
+    const segments = page.split("/").map(encodeURIComponent).join("/");
+    // contentRootUrl always ends with "/", so just append segments
+    url.pathname = url.pathname + segments;
+  }
   if (revision && revision > 0) {
     url.searchParams.set("v", String(revision));
   }

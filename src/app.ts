@@ -16,7 +16,7 @@ import {
 import { UploadsRepository } from "./db";
 import { mimeTypeForPath } from "./mime";
 import { errorPage, expiredPage, notFoundPage, uploadPage, viewerPage } from "./pages";
-import { parseUploadMetadata, serializeUploadMetadata, uploadRevision } from "./upload-metadata";
+import { parseUploadMetadata, passwordRequired, serializeUploadMetadata, uploadRevision, uploadWorkspace } from "./upload-metadata";
 import { contentFrameSrc, contentOrigin, contentRootUrl, isContentHost, viewerUrl } from "./urls";
 import { AppError, type ResourceInfo, type UploadRecord } from "./types";
 
@@ -90,6 +90,17 @@ export function createApp(config: AppConfig): StaticShareApp {
       const apiUploadMatch = url.pathname.match(/^\/api\/uploads\/([^/]+)$/);
       if (method === "GET" && apiUploadMatch) {
         return await handleUploadMetadata(apiUploadMatch[1], repo, config);
+      }
+
+      const apiSettingsMatch = url.pathname.match(/^\/api\/uploads\/([^/]+)\/settings$/);
+      if (apiSettingsMatch) {
+        if (method === "GET") {
+          return await handleGetSettings(apiSettingsMatch[1], repo, config);
+        }
+        if (method === "PATCH") {
+          return await handlePatchSettings(request, apiSettingsMatch[1], repo, config);
+        }
+        return textResponse("Method Not Allowed", 405);
       }
 
       const apiResourcesMatch = url.pathname.match(/^\/api\/uploads\/([^/]+)\/resources\/?(.*)$/);
@@ -285,6 +296,145 @@ async function handleUploadMetadata(id: string, repo: UploadsRepository, config:
   );
 }
 
+async function handleGetSettings(id: string, repo: UploadsRepository, config: AppConfig): Promise<Response> {
+  if (!ID_PATTERN.test(id)) {
+    return jsonResponse({ error: "Upload not found", code: "not_found" }, 404);
+  }
+  const upload = repo.findById(id);
+  if (!upload) {
+    return jsonResponse({ error: "Upload not found", code: "not_found" }, 404);
+  }
+  if (isUploadExpired(upload)) {
+    markExpired(upload, repo);
+    return jsonResponse({ error: "Upload expired", code: "expired" }, 410);
+  }
+
+  const workspace = uploadWorkspace(upload);
+  const resources = await listResources(config, upload.storagePath);
+  const htmlPages = resources
+    .map((r) => r.path)
+    .filter((p) => /\.(html|htm)$/i.test(p))
+    .sort();
+
+  return jsonResponse({
+    id: upload.id,
+    passwordRequired: passwordRequired(upload),
+    homepage: workspace.homepage ?? null,
+    exposed: workspace.exposed ?? [],
+    barDefault: workspace.barDefault ?? true,
+    htmlPages,
+  });
+}
+
+async function handlePatchSettings(request: Request, id: string, repo: UploadsRepository, config: AppConfig): Promise<Response> {
+  if (!ID_PATTERN.test(id)) {
+    return jsonResponse({ error: "Upload not found", code: "not_found" }, 404);
+  }
+  const upload = repo.findById(id);
+  if (!upload) {
+    return jsonResponse({ error: "Upload not found", code: "not_found" }, 404);
+  }
+  if (isUploadExpired(upload)) {
+    markExpired(upload, repo);
+    return jsonResponse({ error: "Upload expired", code: "expired" }, 410);
+  }
+
+  // Auth must be checked BEFORE applying any changes.
+  await requireEditToken(request, upload);
+
+  let body: Record<string, unknown>;
+  try {
+    body = (await request.json()) as Record<string, unknown>;
+  } catch {
+    throw new AppError(400, "invalid_json", "Body must be JSON");
+  }
+
+  // Compute htmlPages for validation
+  const resources = await listResources(config, upload.storagePath);
+  const htmlPages = resources
+    .map((r) => r.path)
+    .filter((p) => /\.(html|htm)$/i.test(p))
+    .sort();
+
+  const currentMetadata = parseUploadMetadata(upload.metadataJson);
+  const currentWorkspace = currentMetadata.workspace ?? {};
+
+  // Build the new workspace by merging existing with provided fields
+  const newWorkspace = { ...currentWorkspace };
+
+  if ("homepage" in body) {
+    const hp = body["homepage"];
+    if (hp === null || hp === "") {
+      delete newWorkspace.homepage;
+    } else if (typeof hp === "string") {
+      if (!htmlPages.includes(hp)) {
+        throw new AppError(400, "invalid_setting", "homepage must be an existing HTML page");
+      }
+      newWorkspace.homepage = hp;
+    }
+  }
+
+  if ("exposed" in body) {
+    const exp = body["exposed"];
+    if (!Array.isArray(exp) || !exp.every((e) => typeof e === "string")) {
+      throw new AppError(400, "invalid_setting", "exposed must be an array of strings");
+    }
+    const invalid = exp.find((e) => !htmlPages.includes(e));
+    if (invalid !== undefined) {
+      throw new AppError(400, "invalid_setting", `exposed entry "${invalid}" must be an existing HTML page`);
+    }
+    newWorkspace.exposed = [...new Set(exp as string[])];
+  }
+
+  if ("barDefault" in body) {
+    const bd = body["barDefault"];
+    if (typeof bd !== "boolean") {
+      throw new AppError(400, "invalid_setting", "barDefault must be a boolean");
+    }
+    newWorkspace.barDefault = bd;
+  }
+
+  // Handle password change only when the "password" key is present in the body
+  let newEditTokenHash = currentMetadata.editTokenHash;
+  if ("password" in body) {
+    const pw = body["password"];
+    if (pw === null || pw === "") {
+      // Clear the password → public edit
+      newEditTokenHash = undefined;
+    } else if (typeof pw === "string") {
+      newEditTokenHash = await sha256Text(pw);
+    }
+  }
+
+  // Build final metadata: preserve revision, update editTokenHash and workspace
+  const newMetadata = {
+    ...currentMetadata,
+    ...(newEditTokenHash !== undefined ? { editTokenHash: newEditTokenHash } : { editTokenHash: undefined }),
+    workspace: Object.keys(newWorkspace).length > 0 ? newWorkspace : undefined,
+  };
+  // Remove undefined keys for clean serialization
+  if (newMetadata.editTokenHash === undefined) {
+    delete newMetadata.editTokenHash;
+  }
+  if (newMetadata.workspace === undefined) {
+    delete newMetadata.workspace;
+  }
+
+  const newMetadataJson = serializeUploadMetadata(newMetadata);
+  repo.updateMetadata(upload.id, newMetadataJson);
+  upload.metadataJson = newMetadataJson;
+
+  const updatedWorkspace = uploadWorkspace(upload);
+  return jsonResponse({
+    id: upload.id,
+    passwordRequired: passwordRequired(upload),
+    homepage: updatedWorkspace.homepage ?? null,
+    exposed: updatedWorkspace.exposed ?? [],
+    barDefault: updatedWorkspace.barDefault ?? true,
+    htmlPages,
+  });
+}
+
 async function handleResourceRequest(
   request: Request,
   method: string,
@@ -396,7 +546,23 @@ async function handleContentRequest(
   }
 
   const root = resolve(config.storageDir, upload.storagePath);
-  const filePath = await resolveContentFile(root, assetPath, config.spaFallback);
+
+  // For root requests, check workspace.homepage first; fall back to normal index resolution.
+  let filePath: string | null;
+  if (!assetPath) {
+    const homepage = uploadWorkspace(upload).homepage;
+    if (homepage && homepage.length > 0) {
+      filePath = await resolveContentFile(root, homepage, false);
+    } else {
+      filePath = null;
+    }
+    if (!filePath) {
+      filePath = await resolveContentFile(root, assetPath, config.spaFallback);
+    }
+  } else {
+    filePath = await resolveContentFile(root, assetPath, config.spaFallback);
+  }
+
   if (!filePath) {
     return textResponse("Not Found", 404, contentHeaders());
   }
@@ -570,10 +736,14 @@ function requireUploadToken(request: Request, config: AppConfig): void {
   }
 }
 
+// Validates the password (edit token) for mutation requests.
+// When no editTokenHash is set, the upload allows public editing — return immediately.
+// When a hash is present, the Bearer token or x-edit-token header must match it.
 async function requireEditToken(request: Request, upload: UploadRecord): Promise<void> {
   const metadata = parseUploadMetadata(upload.metadataJson);
   if (!metadata.editTokenHash) {
-    throw new AppError(401, "edit_token_required", "Edit token is required");
+    // No password set — public edit, allow mutation.
+    return;
   }
 
   const token = bearerToken(request) || request.headers.get("x-edit-token") || "";
