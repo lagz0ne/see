@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangleIcon,
   CameraIcon,
@@ -12,6 +12,7 @@ import {
   KeyRoundIcon,
   LinkIcon,
   MoonIcon,
+  PencilIcon,
   RefreshCcwIcon,
   RotateCwIcon,
   Settings2Icon,
@@ -707,21 +708,74 @@ function ViewerApp({ root }: StaticShareAppProps) {
     };
   }, []);
 
-  // Fetch settings once on mount
-  useEffect(() => {
-    if (!uploadId) return;
-    void fetch(`/api/uploads/${uploadId}/settings`, { cache: "no-store" })
-      .then(async (res) => {
+  // Refs let the SSE listener read the latest revision/page without re-subscribing.
+  const revisionRef = useRef(resourceRevision);
+  revisionRef.current = resourceRevision;
+  const currentPageRef = useRef(currentPage);
+  currentPageRef.current = currentPage;
+
+  const refreshSettings = useCallback(
+    async (setInitialPage: boolean) => {
+      if (!uploadId) return;
+      try {
+        const res = await fetch(`/api/uploads/${uploadId}/settings`, { cache: "no-store" });
         const data = await res.json().catch(() => null);
         if (res.ok && data) {
           setUploadSettings(data as UploadSettings);
-          setCurrentPage((data as UploadSettings).homepage ?? null);
+          if (setInitialPage) {
+            setCurrentPage((data as UploadSettings).homepage ?? null);
+          }
         }
-      })
-      .catch(() => {
-        // silently ignore — settings fetch is best-effort
-      });
-  }, [uploadId]);
+      } catch {
+        // best-effort
+      }
+    },
+    [uploadId],
+  );
+
+  // Reload the iframe at a new revision, preserving whichever page is currently shown.
+  const reloadAtRevision = useCallback(
+    (revision: number) => {
+      const page = currentPageRef.current ?? "";
+      setResourceRevision(revision);
+      setContentUrl(`${contentRoot}${page}?v=${revision}`);
+      setFrameSrc(`${contentRoot}${page}?v=${revision}&t=${Date.now()}`);
+    },
+    [contentRoot],
+  );
+
+  // Fetch settings once on mount.
+  useEffect(() => {
+    void refreshSettings(true);
+  }, [refreshSettings]);
+
+  // Live updates: when an LLM or another human patches content/settings, the server pushes the
+  // new revision over SSE and every connected viewer reloads. EventSource auto-reconnects.
+  useEffect(() => {
+    if (!uploadId || typeof EventSource === "undefined") {
+      return;
+    }
+    const source = new EventSource(`/api/uploads/${uploadId}/events`);
+    source.onmessage = (event) => {
+      let data: { type?: string; revision?: number };
+      try {
+        data = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (data?.type !== "update") {
+        return;
+      }
+      if (typeof data.revision === "number" && data.revision > revisionRef.current) {
+        reloadAtRevision(data.revision);
+      }
+      void refreshSettings(false);
+    };
+    source.onerror = () => {
+      // EventSource reconnects on its own; nothing to do.
+    };
+    return () => source.close();
+  }, [uploadId, refreshSettings, reloadAtRevision]);
 
   // Build the list of navigable pages: unique of [homepage, ...exposed]
   const navigablePages = useMemo<string[]>(() => {
@@ -1194,6 +1248,9 @@ export function ResourceManager({
   const [resourceFile, setResourceFile] = useState<File | null>(null);
   const [status, setStatus] = useState<StatusState>({ message: "", tone: "neutral" });
   const [busy, setBusy] = useState(false);
+  const [editingPath, setEditingPath] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState("");
+  const [editingLoading, setEditingLoading] = useState(false);
   const resourceInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -1287,6 +1344,58 @@ export function ResourceManager({
     }
   }
 
+  async function startEdit(resource: ResourceInfo) {
+    setEditingPath(resource.path);
+    setEditingText("");
+    setEditingLoading(true);
+    setStatus({ message: "", tone: "neutral" });
+    try {
+      const res = await fetch(`/api/uploads/${uploadId}/resources/${encodeResourcePath(resource.path)}`, {
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        throw new Error(`Could not load ${resource.path}.`);
+      }
+      setEditingText(await res.text());
+    } catch (error) {
+      setStatus({ message: error instanceof Error ? error.message : "Load failed.", tone: "error" });
+      setEditingPath(null);
+    } finally {
+      setEditingLoading(false);
+    }
+  }
+
+  async function saveEdit() {
+    if (editingPath === null) {
+      return;
+    }
+    try {
+      setBusy(true);
+      const headers = new Headers({ "Content-Type": "text/plain; charset=utf-8" });
+      // Send the password if we have one; the server allows the edit without it when no password is set.
+      if (editToken.trim()) {
+        headers.set("Authorization", `Bearer ${editToken.trim()}`);
+      }
+      const res = await fetch(`/api/uploads/${uploadId}/resources/${encodeResourcePath(editingPath)}`, {
+        method: "PATCH",
+        headers,
+        body: editingText,
+        cache: "no-store",
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(typeof payload.error === "string" ? payload.error : `Save failed (${res.status}).`);
+      }
+      applyResourcePayload(payload as ResourcePayload);
+      setStatus({ message: `Saved ${editingPath} (revision ${(payload as ResourcePayload).revision}).`, tone: "success" });
+      setEditingPath(null);
+    } catch (error) {
+      setStatus({ message: error instanceof Error ? error.message : "Save failed.", tone: "error" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function applyResourcePayload(payload: ResourcePayload) {
     setResources(payload.resources);
     setRevision(payload.revision);
@@ -1368,6 +1477,30 @@ export function ResourceManager({
         </div>
       ) : null}
 
+      {editingPath !== null ? (
+        <div className="flex flex-col gap-2 rounded-lg border p-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="truncate font-mono text-xs font-medium">{editingPath}</span>
+            <div className="flex shrink-0 gap-1">
+              <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => setEditingPath(null)}>
+                Cancel
+              </Button>
+              <Button type="button" size="sm" variant="secondary" disabled={busy || editingLoading} onClick={() => void saveEdit()}>
+                {busy ? "Saving…" : "Save"}
+              </Button>
+            </div>
+          </div>
+          <textarea
+            value={editingText}
+            spellCheck={false}
+            disabled={editingLoading || busy}
+            onChange={(event) => setEditingText(event.currentTarget.value)}
+            className="h-48 w-full resize-y rounded-md border bg-muted/30 p-2 font-mono text-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40"
+            placeholder={editingLoading ? "Loading…" : ""}
+          />
+        </div>
+      ) : null}
+
       <div className={cn("overflow-auto rounded-lg border", compact ? "max-h-64" : "max-h-80")}>
         {resources.length ? (
           resources.map((resource) => (
@@ -1378,6 +1511,18 @@ export function ResourceManager({
                   {formatBytes(resource.bytes)} · {resource.contentType}
                 </p>
               </div>
+              {isEditableResource(resource) ? (
+                <TooltipButton
+                  label={`Edit ${resource.path}`}
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  disabled={busy}
+                  onClick={() => void startEdit(resource)}
+                >
+                  <PencilIcon data-icon="inline-start" />
+                </TooltipButton>
+              ) : null}
               <TooltipButton
                 label={`Delete ${resource.path}`}
                 type="button"
@@ -1667,6 +1812,18 @@ function clamp(value: number, min: number, max: number): number {
     return min;
   }
   return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+// Text-like resources can be edited inline; binary assets (images, fonts, …) cannot.
+function isEditableResource(resource: ResourceInfo): boolean {
+  const type = resource.contentType.toLowerCase();
+  if (type.startsWith("text/")) {
+    return true;
+  }
+  if (/(javascript|json|svg|xml|html|css|csv|markdown)/.test(type)) {
+    return true;
+  }
+  return /\.(html?|css|js|mjs|cjs|json|svg|xml|txt|md|csv|webmanifest)$/i.test(resource.path);
 }
 
 // Parse the share's saved tweak values from the `data-tweaks` attribute (JSON object of

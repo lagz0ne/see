@@ -101,3 +101,21 @@ If you set `cssVar` in `window.SeeTweaks`, the SDK automatically sets that CSS v
 ### Persistence
 
 Tweak values persist only if the share owner explicitly saves them in Settings (via the bar or the API). Saved tweaks are injected into the viewer page as `data-tweaks` on `#staticShareRoot` and forwarded to the page by the SDK before `applyLive` is called.
+
+---
+
+## Editing content (for agents)
+
+A share is a living set of files — you can patch them over time and every open viewer reloads automatically. The API (origin = the host serving this `/llms.txt`):
+
+- `GET /api/uploads/{id}/resources` — list files (`{ resources: [{ path, bytes, contentType, … }], revision }`).
+- `GET /api/uploads/{id}/resources/{path}` — fetch one file's raw contents (for reading before you patch).
+- `PATCH /api/uploads/{id}/resources/{path}` — replace one file. Body is the raw new contents. Bumps the revision.
+- `POST /api/uploads/{id}/resources` — add/replace files via multipart (`file`, optional `path`).
+- `DELETE /api/uploads/{id}/resources/{path}` — remove a file (an index page must remain).
+
+Authentication: send `Authorization: Bearer <password>` if the share has a password. If the owner cleared the password, edits are open (the link alone grants editing).
+
+Live updates: viewers subscribe to `GET /api/uploads/{id}/events` (Server-Sent Events). Every mutation emits `data: {"type":"update","revision":<n>}`, and the viewer reloads the iframe — so a patch you make is visible to everyone within a moment. You do not need to do anything special; just patch the files.
+
+Workspace settings: `GET /api/uploads/{id}/settings` and `PATCH …/settings` (homepage, exposed pages, tweaks, password). See the host for details.

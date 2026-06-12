@@ -4,7 +4,7 @@ import { uploadRevision, uploadWorkspace } from "./upload-metadata";
 import { contentFrameSrc, contentOrigin, viewerUrl } from "./urls";
 import { escapeHtml } from "./lib/html";
 
-const ASSET_VERSION = "20260612-tweaks";
+const ASSET_VERSION = "20260612-live";
 
 export function uploadPage(config: AppConfig): string {
   return htmlDocument(

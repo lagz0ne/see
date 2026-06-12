@@ -19,6 +19,7 @@ import { errorPage, expiredPage, notFoundPage, uploadPage, viewerPage } from "./
 import { parseUploadMetadata, passwordRequired, serializeUploadMetadata, uploadRevision, uploadWorkspace } from "./upload-metadata";
 import { contentFrameSrc, contentOrigin, contentRootUrl, isContentHost, viewerUrl } from "./urls";
 import { AppError, type ResourceInfo, type UploadRecord } from "./types";
+import { eventBus } from "./events";
 
 type AppServer = Pick<Server<unknown>, "requestIP">;
 
@@ -102,6 +103,14 @@ export function createApp(config: AppConfig): StaticShareApp {
         }
         if (method === "PATCH") {
           return await handlePatchSettings(request, apiSettingsMatch[1], repo, config);
+        }
+        return textResponse("Method Not Allowed", 405);
+      }
+
+      const apiEventsMatch = url.pathname.match(/^\/api\/uploads\/([^/]+)\/events$/);
+      if (apiEventsMatch) {
+        if (method === "GET") {
+          return handleEvents(request, apiEventsMatch[1], repo);
         }
         return textResponse("Method Not Allowed", 405);
       }
@@ -446,6 +455,7 @@ async function handlePatchSettings(request: Request, id: string, repo: UploadsRe
   const newMetadataJson = serializeUploadMetadata(newMetadata);
   repo.updateMetadata(upload.id, newMetadataJson);
   upload.metadataJson = newMetadataJson;
+  eventBus.emit(upload.id, { type: "update", revision: uploadRevision(upload) });
 
   const updatedWorkspace = uploadWorkspace(upload);
   return jsonResponse({
@@ -456,6 +466,82 @@ async function handlePatchSettings(request: Request, id: string, repo: UploadsRe
     barDefault: updatedWorkspace.barDefault ?? true,
     tweaks: updatedWorkspace.tweaks ?? {},
     htmlPages,
+  });
+}
+
+function handleEvents(request: Request, id: string, repo: UploadsRepository): Response {
+  if (!ID_PATTERN.test(id)) {
+    return jsonResponse({ error: "Upload not found", code: "not_found" }, 404);
+  }
+  const upload = repo.findById(id);
+  if (!upload) {
+    return jsonResponse({ error: "Upload not found", code: "not_found" }, 404);
+  }
+  if (isUploadExpired(upload)) {
+    markExpired(upload, repo);
+    return jsonResponse({ error: "Upload expired", code: "expired" }, 410);
+  }
+
+  const encoder = new TextEncoder();
+  const initialRevision = uploadRevision(upload);
+
+  // Shared cleanup state — captured in the closure so both start() and cancel() share it.
+  let closed = false;
+  let unsubscribe: (() => void) | null = null;
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+
+  function cleanup(): void {
+    if (closed) return;
+    closed = true;
+    if (heartbeat !== null) {
+      clearInterval(heartbeat);
+      heartbeat = null;
+    }
+    unsubscribe?.();
+    unsubscribe = null;
+  }
+
+  const stream = new ReadableStream({
+    start(controller) {
+      function safeEnqueue(chunk: Uint8Array): void {
+        if (closed) return;
+        try {
+          controller.enqueue(chunk);
+        } catch {
+          cleanup();
+        }
+      }
+
+      // Send the initial revision event immediately.
+      safeEnqueue(encoder.encode("data: " + JSON.stringify({ type: "update", revision: initialRevision }) + "\n\n"));
+
+      // Subscribe to future updates for this upload id.
+      unsubscribe = eventBus.subscribe(id, (data) => {
+        safeEnqueue(encoder.encode("data: " + JSON.stringify(data) + "\n\n"));
+      });
+
+      // Heartbeat every 25 seconds to keep the connection alive through proxies.
+      heartbeat = setInterval(() => {
+        safeEnqueue(encoder.encode(": ping\n\n"));
+      }, 25_000);
+
+      // Clean up when the client disconnects (abort signal fires on request cancellation).
+      request.signal.addEventListener("abort", cleanup);
+    },
+    cancel() {
+      // Called when the consumer cancels the reader (e.g. reader.cancel() in tests).
+      cleanup();
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-store",
+      "Connection": "keep-alive",
+      "X-Content-Type-Options": "nosniff",
+    },
   });
 }
 
@@ -480,7 +566,25 @@ async function handleResourceRequest(
   }
 
   if (method === "GET") {
-    return jsonResponse(resourceListPayload(config, upload, await listResources(config, upload.storagePath)));
+    if (!resourcePath) {
+      // No path specified — return the full resource list.
+      return jsonResponse(resourceListPayload(config, upload, await listResources(config, upload.storagePath)));
+    }
+    // Non-empty path — serve the raw file bytes for the inline editor.
+    const decodedPath = decodeResourcePathFromUrl(resourcePath);
+    const root = resolve(config.storageDir, upload.storagePath);
+    const filePath = await resolveContentFile(root, decodedPath, false);
+    if (!filePath) {
+      return jsonResponse({ error: "Resource not found", code: "resource_not_found" }, 404);
+    }
+    return new Response(Bun.file(filePath), {
+      status: 200,
+      headers: {
+        "Content-Type": mimeTypeForPath(decodedPath),
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
   }
 
   await requireEditToken(request, upload);
@@ -873,6 +977,7 @@ function persistResourceMutation(
     metadataJson,
   });
   upload.metadataJson = metadataJson;
+  eventBus.emit(upload.id, { type: "update", revision });
   return {
     id: upload.id,
     revision,

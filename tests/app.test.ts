@@ -668,6 +668,84 @@ describe("static app share service", () => {
     expect(html).toContain("primaryColor");
     expect(html).toContain("#fff");
   });
+
+  test("GET /api/uploads/:id/events returns SSE stream with initial revision event", async () => {
+    const { app } = await testApp();
+    const payload = await (
+      await uploadFile(app, new File(["<h1>SSE</h1>"], "index.html", { type: "text/html" }))
+    ).json();
+
+    const res = await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/events`));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+
+    // Read the first chunk with a timeout to prevent the test from hanging.
+    const reader = res.body!.getReader();
+    let firstChunk: string;
+    try {
+      const result = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("SSE read timeout")), 2000),
+        ),
+      ]);
+      firstChunk = new TextDecoder().decode((result as ReadableStreamReadValueResult<Uint8Array>).value);
+    } finally {
+      await reader.cancel();
+    }
+
+    expect(firstChunk).toContain('"type":"update"');
+    expect(firstChunk).toContain('"revision"');
+  });
+
+  test("GET /api/uploads/:id/events returns 404 for missing or invalid id", async () => {
+    const { app } = await testApp();
+
+    // Invalid id format
+    const invalid = await app.fetch(new Request("http://share.test/api/uploads/not-an-id/events"));
+    expect(invalid.status).toBe(404);
+    expect(await invalid.json()).toMatchObject({ code: "not_found" });
+
+    // Valid format but non-existent upload
+    const missing = await app.fetch(new Request("http://share.test/api/uploads/u_aaaaaaaaaaaa/events"));
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toMatchObject({ code: "not_found" });
+  });
+
+  test("GET /api/uploads/:id/resources/:path serves raw file bytes", async () => {
+    const { app } = await testApp();
+    const htmlContent = "<h1>Raw resource</h1><p>hello</p>";
+    const payload = await (
+      await uploadFile(app, new File([htmlContent], "index.html", { type: "text/html" }))
+    ).json();
+
+    // Existing file returns raw bytes
+    const raw = await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/resources/index.html`));
+    expect(raw.status).toBe(200);
+    const body = await raw.text();
+    expect(body).toContain("Raw resource");
+
+    // Non-existent file returns 404 with resource_not_found
+    const missing = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/resources/does-not-exist.html`),
+    );
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toMatchObject({ code: "resource_not_found" });
+  });
+
+  test("GET /api/uploads/:id/resources (no path) still returns JSON resource list", async () => {
+    const { app } = await testApp();
+    const payload = await (
+      await uploadFile(app, new File(["<h1>list</h1>"], "index.html", { type: "text/html" }))
+    ).json();
+
+    const list = await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/resources`));
+    expect(list.status).toBe(200);
+    const body = await list.json();
+    expect(body.resources).toBeDefined();
+    expect(Array.isArray(body.resources)).toBe(true);
+    expect(body.revision).toBeDefined();
+  });
 });
 
 async function testApp(env: Record<string, string> = {}): Promise<{ app: StaticShareApp; dir: string; config: AppConfig }> {
