@@ -42,7 +42,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     maxPathDepth: readInteger(env.MAX_PATH_DEPTH, DEFAULT_MAX_PATH_DEPTH, "MAX_PATH_DEPTH"),
     maxExtractedFileBytes: readInteger(env.MAX_EXTRACTED_FILE_BYTES, DEFAULT_MAX_UPLOAD_BYTES, "MAX_EXTRACTED_FILE_BYTES"),
     uploadToken: env.UPLOAD_TOKEN?.trim() || null,
-    trustProxy: readBoolean(env.TRUST_PROXY, true),
+    trustProxy: readBoolean(env.TRUST_PROXY, false),
     spaFallback: readBoolean(env.SPA_FALLBACK, true),
     uploadRateLimitWindowSeconds: readInteger(env.UPLOAD_RATE_LIMIT_WINDOW_SECONDS, 60, "UPLOAD_RATE_LIMIT_WINDOW_SECONDS"),
     uploadRateLimitMax: readInteger(env.UPLOAD_RATE_LIMIT_MAX, 20, "UPLOAD_RATE_LIMIT_MAX"),

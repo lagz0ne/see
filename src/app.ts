@@ -115,6 +115,14 @@ export function createApp(config: AppConfig): StaticShareApp {
         return textResponse("Method Not Allowed", 405);
       }
 
+      const apiPatchMatch = url.pathname.match(/^\/api\/uploads\/([^/]+)\/patch$/);
+      if (apiPatchMatch) {
+        if (method === "POST") {
+          return await handlePatchBatch(request, apiPatchMatch[1], repo, config);
+        }
+        return textResponse("Method Not Allowed", 405);
+      }
+
       const apiResourcesMatch = url.pathname.match(/^\/api\/uploads\/([^/]+)\/resources\/?(.*)$/);
       if (apiResourcesMatch) {
         return await handleResourceRequest(request, method, apiResourcesMatch[1], apiResourcesMatch[2] || "", repo, config);
@@ -200,7 +208,7 @@ async function handleUpload(
   const title = typeof titleValue === "string" && titleValue.trim() ? titleValue.trim().slice(0, 120) : null;
   const requestedEditToken = formString(formData, "editToken", 256);
   const editToken = requestedEditToken || randomEditToken();
-  const editTokenHash = await sha256Text(editToken);
+  const editTokenHash = await hashEditToken(editToken);
 
   const artifact = await storeUploadedArtifact(config, files);
   const createdAt = new Date().toISOString();
@@ -355,6 +363,9 @@ async function handlePatchSettings(request: Request, id: string, repo: UploadsRe
   // Auth must be checked BEFORE applying any changes.
   await requireEditToken(request, upload);
 
+  // Settings payloads are small; reject oversized bodies before buffering JSON.
+  rejectOversizedRequest(request, 64 * 1024, "settings_too_large");
+
   let body: Record<string, unknown>;
   try {
     body = (await request.json()) as Record<string, unknown>;
@@ -413,9 +424,19 @@ async function handlePatchSettings(request: Request, id: string, repo: UploadsRe
       throw new AppError(400, "invalid_setting", "tweaks must be an object of primitive values");
     }
     const tweaksObj = tw as Record<string, unknown>;
-    for (const [, v] of Object.entries(tweaksObj)) {
+    const tweakEntries = Object.entries(tweaksObj);
+    if (tweakEntries.length > 100) {
+      throw new AppError(400, "invalid_setting", "tweaks supports at most 100 keys");
+    }
+    for (const [k, v] of tweakEntries) {
+      if (k.length > 64) {
+        throw new AppError(400, "invalid_setting", "tweaks keys must be at most 64 characters");
+      }
       if (typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") {
         throw new AppError(400, "invalid_setting", "tweaks must be an object of primitive values");
+      }
+      if (typeof v === "string" && v.length > 2048) {
+        throw new AppError(400, "invalid_setting", "tweaks values must be at most 2048 characters");
       }
     }
     const validTweaks = tweaksObj as Record<string, string | number | boolean>;
@@ -434,7 +455,7 @@ async function handlePatchSettings(request: Request, id: string, repo: UploadsRe
       // Clear the password → public edit
       newEditTokenHash = undefined;
     } else if (typeof pw === "string") {
-      newEditTokenHash = await sha256Text(pw);
+      newEditTokenHash = await hashEditToken(pw);
     }
   }
 
@@ -469,6 +490,11 @@ async function handlePatchSettings(request: Request, id: string, repo: UploadsRe
   });
 }
 
+// Global cap on concurrent SSE streams so a client cannot exhaust memory/timers
+// by opening unbounded connections (each holds a heartbeat timer + listener).
+const MAX_SSE_CONNECTIONS = 1000;
+let activeSseConnections = 0;
+
 function handleEvents(request: Request, id: string, repo: UploadsRepository): Response {
   if (!ID_PATTERN.test(id)) {
     return jsonResponse({ error: "Upload not found", code: "not_found" }, 404);
@@ -480,6 +506,9 @@ function handleEvents(request: Request, id: string, repo: UploadsRepository): Re
   if (isUploadExpired(upload)) {
     markExpired(upload, repo);
     return jsonResponse({ error: "Upload expired", code: "expired" }, 410);
+  }
+  if (activeSseConnections >= MAX_SSE_CONNECTIONS) {
+    return jsonResponse({ error: "Too many live connections", code: "too_many_connections" }, 429);
   }
 
   const encoder = new TextEncoder();
@@ -493,6 +522,7 @@ function handleEvents(request: Request, id: string, repo: UploadsRepository): Re
   function cleanup(): void {
     if (closed) return;
     closed = true;
+    activeSseConnections -= 1;
     if (heartbeat !== null) {
       clearInterval(heartbeat);
       heartbeat = null;
@@ -501,38 +531,48 @@ function handleEvents(request: Request, id: string, repo: UploadsRepository): Re
     unsubscribe = null;
   }
 
-  const stream = new ReadableStream({
-    start(controller) {
-      function safeEnqueue(chunk: Uint8Array): void {
-        if (closed) return;
-        try {
-          controller.enqueue(chunk);
-        } catch {
-          cleanup();
+  activeSseConnections += 1;
+
+  // Construct under try/catch so a synchronous throw during stream setup still
+  // releases the connection slot (cleanup is only wired up inside start()).
+  let stream: ReadableStream<Uint8Array>;
+  try {
+    stream = new ReadableStream({
+      start(controller) {
+        function safeEnqueue(chunk: Uint8Array): void {
+          if (closed) return;
+          try {
+            controller.enqueue(chunk);
+          } catch {
+            cleanup();
+          }
         }
-      }
 
-      // Send the initial revision event immediately.
-      safeEnqueue(encoder.encode("data: " + JSON.stringify({ type: "update", revision: initialRevision }) + "\n\n"));
+        // Send the initial revision event immediately.
+        safeEnqueue(encoder.encode("data: " + JSON.stringify({ type: "update", revision: initialRevision }) + "\n\n"));
 
-      // Subscribe to future updates for this upload id.
-      unsubscribe = eventBus.subscribe(id, (data) => {
-        safeEnqueue(encoder.encode("data: " + JSON.stringify(data) + "\n\n"));
-      });
+        // Subscribe to future updates for this upload id.
+        unsubscribe = eventBus.subscribe(id, (data) => {
+          safeEnqueue(encoder.encode("data: " + JSON.stringify(data) + "\n\n"));
+        });
 
-      // Heartbeat every 25 seconds to keep the connection alive through proxies.
-      heartbeat = setInterval(() => {
-        safeEnqueue(encoder.encode(": ping\n\n"));
-      }, 25_000);
+        // Heartbeat every 25 seconds to keep the connection alive through proxies.
+        heartbeat = setInterval(() => {
+          safeEnqueue(encoder.encode(": ping\n\n"));
+        }, 25_000);
 
-      // Clean up when the client disconnects (abort signal fires on request cancellation).
-      request.signal.addEventListener("abort", cleanup);
-    },
-    cancel() {
-      // Called when the consumer cancels the reader (e.g. reader.cancel() in tests).
-      cleanup();
-    },
-  });
+        // Clean up when the client disconnects (abort signal fires on request cancellation).
+        request.signal.addEventListener("abort", cleanup);
+      },
+      cancel() {
+        // Called when the consumer cancels the reader (e.g. reader.cancel() in tests).
+        cleanup();
+      },
+    });
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
 
   return new Response(stream, {
     status: 200,
@@ -887,6 +927,30 @@ function requireUploadToken(request: Request, config: AppConfig): void {
   }
 }
 
+// Matches a legacy SHA-256 hex digest (64 lowercase hex chars) so we can keep
+// verifying edit tokens stored before the switch to a slow password hash.
+const LEGACY_SHA256_HASH = /^[0-9a-f]{64}$/;
+
+// Hashes an edit token / password for storage. Uses a slow, salted KDF (argon2id
+// via Bun.password) so a leaked metadata row cannot be brute-forced offline the
+// way a bare SHA-256 digest could.
+async function hashEditToken(value: string): Promise<string> {
+  return Bun.password.hash(value);
+}
+
+// Verifies a presented token against a stored hash. Transparently handles both
+// the new argon2id hashes and legacy SHA-256 digests from older uploads.
+async function verifyEditToken(token: string, storedHash: string): Promise<boolean> {
+  if (LEGACY_SHA256_HASH.test(storedHash)) {
+    return constantTimeEqual(await sha256Text(token), storedHash);
+  }
+  try {
+    return await Bun.password.verify(token, storedHash);
+  } catch {
+    return false;
+  }
+}
+
 // Validates the password (edit token) for mutation requests.
 // When no editTokenHash is set, the upload allows public editing — return immediately.
 // When a hash is present, the Bearer token or x-edit-token header must match it.
@@ -902,8 +966,7 @@ async function requireEditToken(request: Request, upload: UploadRecord): Promise
     throw new AppError(401, "edit_token_required", "Edit token is required");
   }
 
-  const actual = await sha256Text(token);
-  if (!constantTimeEqual(actual, metadata.editTokenHash)) {
+  if (!(await verifyEditToken(token, metadata.editTokenHash))) {
     throw new AppError(401, "invalid_edit_token", "Edit token is invalid");
   }
 }
@@ -1001,6 +1064,7 @@ function clientIp(request: Request, server: AppServer | undefined, config: AppCo
 
 class UploadRateLimiter {
   private readonly hits = new Map<string, number[]>();
+  private static readonly MAX_TRACKED_IPS = 50_000;
 
   constructor(private readonly config: AppConfig) {}
 
@@ -1010,6 +1074,15 @@ class UploadRateLimiter {
     }
     const now = Date.now();
     const since = now - this.config.uploadRateLimitWindowSeconds * 1000;
+    // Hard-bound the map so distinct keys cannot grow memory unboundedly. Map
+    // preserves insertion order, so the first key is the oldest-tracked IP —
+    // evicting it is O(1) and keeps this off the per-request hot path.
+    if (!this.hits.has(ip) && this.hits.size >= UploadRateLimiter.MAX_TRACKED_IPS) {
+      const oldest = this.hits.keys().next().value;
+      if (oldest !== undefined) {
+        this.hits.delete(oldest);
+      }
+    }
     const recent = (this.hits.get(ip) ?? []).filter((time) => time >= since);
     if (recent.length >= this.config.uploadRateLimitMax) {
       this.hits.set(ip, recent);

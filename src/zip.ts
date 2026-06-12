@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { inflateRawSync } from "node:zlib";
 import { AppError } from "./types";
 import { copyBytes } from "./lib/bytes";
 
@@ -71,7 +72,7 @@ export async function extractZipArtifact(bytes: Uint8Array, destination: string,
       throw new AppError(413, "extracted_archive_too_large", `Archive exceeds ${limits.maxExtractedBytes} extracted bytes`);
     }
 
-    const content = inflateEntry(bytes, entry);
+    const content = inflateEntry(bytes, entry, limits.maxExtractedFileBytes);
     if (content.byteLength !== entry.uncompressedSize) {
       throw new AppError(422, "zip_size_mismatch", `Archive entry size mismatch: ${outputPath}`);
     }
@@ -240,7 +241,7 @@ function chooseRootPrefix(files: ZipEntry[]): string {
   return "";
 }
 
-function inflateEntry(bytes: Uint8Array, entry: ZipEntry): Uint8Array {
+function inflateEntry(bytes: Uint8Array, entry: ZipEntry, maxOutputBytes: number): Uint8Array {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const offset = entry.localHeaderOffset;
   if (offset + 30 > bytes.byteLength || view.getUint32(offset, true) !== LOCAL_FILE_SIGNATURE) {
@@ -257,12 +258,21 @@ function inflateEntry(bytes: Uint8Array, entry: ZipEntry): Uint8Array {
 
   const compressed = bytes.subarray(dataStart, dataEnd);
   if (entry.compressionMethod === 0) {
+    if (compressed.byteLength > maxOutputBytes) {
+      throw new AppError(413, "extracted_file_too_large", `Archive entry exceeds ${maxOutputBytes} bytes: ${entry.rawName}`);
+    }
     return copyBytes(compressed);
   }
 
+  // Cap the decompressed output so a malicious entry that lies about its
+  // uncompressedSize in the central directory cannot force a huge allocation
+  // (zip-bomb) before the post-inflate size check runs.
   try {
-    return copyBytes(Bun.inflateSync(copyBytes(compressed)));
-  } catch {
+    return copyBytes(inflateRawSync(copyBytes(compressed), { maxOutputLength: maxOutputBytes }));
+  } catch (error) {
+    if (error instanceof RangeError) {
+      throw new AppError(413, "extracted_file_too_large", `Archive entry exceeds ${maxOutputBytes} bytes: ${entry.rawName}`);
+    }
     throw new AppError(422, "extraction_failed", `Failed to inflate zip entry: ${entry.rawName}`);
   }
 }

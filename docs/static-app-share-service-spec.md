@@ -571,7 +571,7 @@ Environment variables:
 | `MAX_FILE_COUNT` | `1000` | Extracted file count limit |
 | `MAX_PATH_DEPTH` | `12` | Path depth limit |
 | `UPLOAD_TOKEN` | empty | Optional upload protection |
-| `TRUST_PROXY` | `true` | Respect reverse proxy headers |
+| `TRUST_PROXY` | `false` | Respect reverse proxy `X-Forwarded-For`. Enable only behind a trusted proxy; otherwise the header is spoofable and bypasses rate limiting |
 
 Example Docker Compose:
 

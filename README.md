@@ -60,6 +60,7 @@ All config is via environment variables (see `src/config.ts`):
 | `RETENTION_DAYS` | `7` | How long shares live |
 | `MAX_UPLOAD_BYTES` | `26214400` (25 MiB) | Per-request upload cap |
 | `UPLOAD_TOKEN` | _(none)_ | If set, creating a share requires `Authorization: Bearer <token>` |
+| `TRUST_PROXY` | `false` | Trust `X-Forwarded-For` for client IP / rate limiting. **Leave `false` unless behind a trusted reverse proxy** — otherwise the header is spoofable and defeats the upload rate limiter. Set `true` only when a proxy (nginx/Caddy/LB) sets a reliable `X-Forwarded-For`. |
 
 See `docs/static-app-share-service-spec.md` for the full design, API surface, and
 security model.
