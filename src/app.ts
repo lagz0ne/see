@@ -11,8 +11,11 @@ import {
   randomEditToken,
   sha256Text,
   storeUploadedArtifact,
+  type ResourceWriteInput,
   type ResourceWriteSummary,
 } from "./artifacts";
+import { applyPatchBatch, MAX_OPS_PER_BATCH } from "./patch/apply";
+import type { RawOp } from "./patch/types";
 import { UploadsRepository } from "./db";
 import { mimeTypeForPath } from "./mime";
 import { errorPage, expiredPage, notFoundPage, uploadPage, viewerPage } from "./pages";
@@ -582,6 +585,92 @@ function handleEvents(request: Request, id: string, repo: UploadsRepository): Re
       "Connection": "keep-alive",
       "X-Content-Type-Options": "nosniff",
     },
+  });
+}
+
+async function handlePatchBatch(
+  request: Request,
+  id: string,
+  repo: UploadsRepository,
+  config: AppConfig,
+): Promise<Response> {
+  if (!ID_PATTERN.test(id)) {
+    return jsonResponse({ error: "Upload not found", code: "not_found" }, 404);
+  }
+  const upload = repo.findById(id);
+  if (!upload) {
+    return jsonResponse({ error: "Upload not found", code: "not_found" }, 404);
+  }
+  if (isUploadExpired(upload)) {
+    markExpired(upload, repo);
+    return jsonResponse({ error: "Upload expired", code: "expired" }, 410);
+  }
+
+  // Auth before any read/write.
+  await requireEditToken(request, upload);
+  rejectOversizedRequest(request, config.maxExtractedFileBytes, "patch_too_large");
+
+  let body: { ops?: unknown; dryRun?: unknown };
+  try {
+    body = (await request.json()) as { ops?: unknown; dryRun?: unknown };
+  } catch {
+    throw new AppError(400, "invalid_json", "Body must be JSON");
+  }
+  if (!Array.isArray(body.ops) || body.ops.length === 0) {
+    throw new AppError(400, "invalid_patch", 'Body must include a non-empty "ops" array');
+  }
+  if (body.ops.length > MAX_OPS_PER_BATCH) {
+    throw new AppError(400, "too_many_ops", `A batch may contain at most ${MAX_OPS_PER_BATCH} ops`);
+  }
+  const dryRun = body.dryRun === true;
+
+  const root = resolve(config.storageDir, upload.storagePath);
+  const readFile = async (file: string): Promise<string | null> => {
+    let decoded: string;
+    try {
+      decoded = decodeResourcePathFromUrl(file);
+    } catch {
+      return null;
+    }
+    const filePath = await resolveContentFile(root, decoded, false);
+    if (!filePath) return null;
+    return await Bun.file(filePath).text();
+  };
+
+  const batch = await applyPatchBatch(body.ops as RawOp[], readFile);
+
+  // Atomic: if any op was invalid/unappliable, write nothing.
+  if (!batch.ok) {
+    return jsonResponse({ ok: false, dryRun, code: "patch_failed", results: batch.results }, 422);
+  }
+
+  if (dryRun || batch.outputs.size === 0) {
+    // Dry run, or every op legitimately matched zero nodes — report without writing.
+    return jsonResponse({ ok: true, dryRun, revision: uploadRevision(upload), changed: [], results: batch.results });
+  }
+
+  const inputs: ResourceWriteInput[] = [];
+  for (const [file, content] of batch.outputs) {
+    const decoded = decodeResourcePathFromUrl(file);
+    const f = new File([content], decoded.split("/").pop() || "resource", { type: mimeTypeForPath(decoded) });
+    inputs.push({ file: f, path: decoded });
+  }
+  const summary = await addOrReplaceResources(config, upload.storagePath, inputs);
+  const payload = persistResourceMutation(repo, config, upload, summary);
+
+  logEvent("info", "resource_patch_batch_success", {
+    id: upload.id,
+    opCount: body.ops.length,
+    changedFiles: batch.outputs.size,
+    revision: payload.revision,
+  });
+
+  return jsonResponse({
+    ok: true,
+    dryRun: false,
+    revision: payload.revision,
+    changed: [...batch.outputs.keys()],
+    results: batch.results,
   });
 }
 

@@ -746,6 +746,124 @@ describe("static app share service", () => {
     expect(Array.isArray(body.resources)).toBe(true);
     expect(body.revision).toBeDefined();
   });
+
+  test("POST /api/uploads/:id/patch applies structured ops across file types and bumps the revision", async () => {
+    const { app } = await testApp();
+    const html = `<!doctype html><html><body><h1 class="title">Old</h1></body></html>`;
+    const payload = await (
+      await uploadFiles(app, [
+        new File([html], "index.html", { type: "text/html" }),
+        new File([`{\n  "price": 10\n}\n`], "data.json", { type: "application/json" }),
+        new File([`.btn { color: red; }\n`], "style.css", { type: "text/css" }),
+      ])
+    ).json();
+
+    const res = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/patch`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${payload.editToken}` },
+        body: JSON.stringify({
+          ops: [
+            { file: "index.html", select: ".title", action: "setText", value: "New title" },
+            { file: "data.json", pointer: "/price", action: "set", value: 42 },
+            { file: "style.css", selectRule: ".btn", action: "setDecl", prop: "color", value: "#D97757" },
+          ],
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const out = await res.json();
+    expect(out.ok).toBe(true);
+    expect(out.revision).toBe(payload.revision + 1);
+    expect(out.changed.sort()).toEqual(["data.json", "index.html", "style.css"]);
+
+    expect(await (await app.fetch(new Request(`http://share.test/content/${payload.id}/index.html`))).text()).toContain(
+      "New title",
+    );
+    const json = await (await app.fetch(new Request(`http://share.test/content/${payload.id}/data.json`))).json();
+    expect(json.price).toBe(42);
+    expect(await (await app.fetch(new Request(`http://share.test/content/${payload.id}/style.css`))).text()).toContain(
+      "#D97757",
+    );
+  });
+
+  test("POST /api/uploads/:id/patch dryRun reports matches without writing", async () => {
+    const { app } = await testApp();
+    const payload = await (
+      await uploadFile(app, new File([`<h1 class="t">Old</h1>`], "index.html", { type: "text/html" }))
+    ).json();
+
+    const res = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/patch`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${payload.editToken}` },
+        body: JSON.stringify({ dryRun: true, ops: [{ file: "index.html", select: ".t", action: "setText", value: "New" }] }),
+      }),
+    );
+    const out = await res.json();
+    expect(out.ok).toBe(true);
+    expect(out.dryRun).toBe(true);
+    expect(out.revision).toBe(payload.revision);
+    expect(out.results[0]).toEqual({ file: "index.html", matched: 1, applied: true });
+    expect(await (await app.fetch(new Request(`http://share.test/content/${payload.id}/index.html`))).text()).toContain(
+      "Old",
+    );
+  });
+
+  test("POST /api/uploads/:id/patch is atomic: one bad op writes nothing (422)", async () => {
+    const { app } = await testApp();
+    const payload = await (
+      await uploadFile(app, new File([`<h1 class="t">Old</h1>`], "index.html", { type: "text/html" }))
+    ).json();
+
+    const res = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/patch`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${payload.editToken}` },
+        body: JSON.stringify({
+          ops: [
+            { file: "index.html", select: ".t", action: "setText", value: "New" },
+            { file: "index.html", select: ".t", action: "bogusAction" },
+          ],
+        }),
+      }),
+    );
+    expect(res.status).toBe(422);
+    const out = await res.json();
+    expect(out.ok).toBe(false);
+    expect(out.results[1].error).toBeTruthy();
+    expect(await (await app.fetch(new Request(`http://share.test/content/${payload.id}/index.html`))).text()).toContain(
+      "Old",
+    );
+  });
+
+  test("POST /api/uploads/:id/patch enforces the password when one is set", async () => {
+    const { app } = await testApp();
+    const payload = await (
+      await uploadFile(app, new File([`<h1 class="t">Old</h1>`], "index.html", { type: "text/html" }), {
+        editToken: "s3cret",
+      })
+    ).json();
+
+    const body = JSON.stringify({ ops: [{ file: "index.html", select: ".t", action: "setText", value: "New" }] });
+    const unauth = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/patch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      }),
+    );
+    expect(unauth.status).toBe(401);
+
+    const authed = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/patch`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer s3cret" },
+        body,
+      }),
+    );
+    expect(authed.status).toBe(200);
+  });
 });
 
 async function testApp(env: Record<string, string> = {}): Promise<{ app: StaticShareApp; dir: string; config: AppConfig }> {

@@ -110,11 +110,64 @@ A share is a living set of files — you can patch them over time and every open
 
 - `GET /api/uploads/{id}/resources` — list files (`{ resources: [{ path, bytes, contentType, … }], revision }`).
 - `GET /api/uploads/{id}/resources/{path}` — fetch one file's raw contents (for reading before you patch).
-- `PATCH /api/uploads/{id}/resources/{path}` — replace one file. Body is the raw new contents. Bumps the revision.
+- `POST /api/uploads/{id}/patch` — **structured, surgical patching** (preferred — see below).
+- `PATCH /api/uploads/{id}/resources/{path}` — replace one whole file. Body is the raw new contents. Bumps the revision.
 - `POST /api/uploads/{id}/resources` — add/replace files via multipart (`file`, optional `path`).
 - `DELETE /api/uploads/{id}/resources/{path}` — remove a file (an index page must remain).
 
 Authentication: send `Authorization: Bearer <password>` if the share has a password. If the owner cleared the password, edits are open (the link alone grants editing).
+
+### Structured patching — `POST /api/uploads/{id}/patch`
+
+Instead of re-uploading a whole file, address the exact nodes you want to change with the query language native to the file type, and batch many edits into one request. The file type is detected from the extension. Body:
+
+```json
+{
+  "dryRun": false,
+  "ops": [
+    { "file": "index.html", "select": ".hero h1", "action": "setText", "value": "Summer Sale" },
+    { "file": "index.html", "select": "#cta",      "action": "setAttr", "name": "href", "value": "/buy" },
+    { "file": "index.html", "select": ".sold-out", "action": "remove" },
+    { "file": "data.json",  "pointer": "/items/0/price", "action": "set", "value": 42 },
+    { "file": "style.css",  "selectRule": ".btn", "action": "setDecl", "prop": "color", "value": "#D97757" }
+  ]
+}
+```
+
+Response: `{ ok, dryRun, revision, changed: ["index.html", …], results: [{ file, matched, applied, error? }, …] }` — one `results` entry per op, in order. `matched` is how many nodes the address hit (an HTML/CSS selector can match several — the op applies to all). Set `dryRun: true` to get match counts back **without writing** — use it to confirm your selectors first.
+
+**Atomic & safe.** If any op is invalid (bad action, malformed address, unparseable target file, missing file), the whole batch is rejected with HTTP `422` and *nothing* is written. A selector that legitimately matches zero nodes is **not** an error — it reports `matched: 0` and is skipped. On success the revision bumps once and all viewers reload. Max 200 ops per batch.
+
+**HTML** — `file` ends in `.html`/`.htm`, addressed by **CSS selector** (`select`):
+
+| action | fields | effect |
+|--------|--------|--------|
+| `setText` | `value` | replace text content |
+| `setHtml` | `value` | replace inner HTML |
+| `setAttr` | `name`, `value` | set an attribute |
+| `removeAttr` | `name` | remove an attribute |
+| `addClass` / `removeClass` | `value` | add/remove class(es) |
+| `append` / `prepend` | `value` | insert HTML inside, at end/start |
+| `replaceWith` | `value` | replace the element with HTML |
+| `remove` | — | delete the element |
+
+**JSON** — `file` ends in `.json`, addressed by **RFC 6901 JSON Pointer** (`pointer`, e.g. `/items/0/price`; `""` is the whole document):
+
+| action | fields | effect |
+|--------|--------|--------|
+| `set` | `value` | set/replace at the pointer (use trailing `/-` to append to an array) |
+| `insert` | `value` | insert into an array at the pointer's index (shifts the rest) |
+| `append` | `value` | push onto the array addressed by the pointer |
+| `remove` | — | delete the key or array element |
+
+**CSS** — `file` ends in `.css`, rules addressed by selector text (`selectRule`):
+
+| action | fields | effect |
+|--------|--------|--------|
+| `setDecl` | `selectRule`, `prop`, `value` | set a declaration (adds it if absent) |
+| `removeDecl` | `selectRule`, `prop` | remove a declaration |
+| `removeRule` | `selectRule` | remove the whole rule |
+| `addRule` | `selector`, `declarations` (object) | append a new rule |
 
 Live updates: viewers subscribe to `GET /api/uploads/{id}/events` (Server-Sent Events). Every mutation emits `data: {"type":"update","revision":<n>}`, and the viewer reloads the iframe — so a patch you make is visible to everyone within a moment. You do not need to do anything special; just patch the files.
 
