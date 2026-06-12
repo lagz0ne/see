@@ -1,4 +1,4 @@
-export type UploadKind = "html" | "zip" | "resources";
+export type UploadKind = "html" | "zip" | "resources" | "bundle";
 export type UploadStatus = "ready" | "failed" | "expired" | "deleted";
 
 export type ResourceInfo = {

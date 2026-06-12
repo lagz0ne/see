@@ -701,13 +701,13 @@ describe("static app share service", () => {
   test("GET /api/uploads/:id/events returns 404 for missing or invalid id", async () => {
     const { app } = await testApp();
 
-    // Invalid id format
-    const invalid = await app.fetch(new Request("http://share.test/api/uploads/not-an-id/events"));
+    // Invalid id format (uppercase + underscore are not valid share ids)
+    const invalid = await app.fetch(new Request("http://share.test/api/uploads/Not_An_Id/events"));
     expect(invalid.status).toBe(404);
     expect(await invalid.json()).toMatchObject({ code: "not_found" });
 
     // Valid format but non-existent upload
-    const missing = await app.fetch(new Request("http://share.test/api/uploads/u_aaaaaaaaaaaa/events"));
+    const missing = await app.fetch(new Request("http://share.test/api/uploads/mirovel-3f7k/events"));
     expect(missing.status).toBe(404);
     expect(await missing.json()).toMatchObject({ code: "not_found" });
   });
@@ -863,6 +863,104 @@ describe("static app share service", () => {
       }),
     );
     expect(authed.status).toBe(200);
+  });
+
+  test("claims a friendly name, keeping the conflict-free suffix", async () => {
+    const { app } = await testApp();
+    const payload = await (
+      await uploadFile(app, new File(["<h1>Claim me</h1>"], "index.html", { type: "text/html" }), {
+        editToken: "owner",
+      })
+    ).json();
+    const oldId: string = payload.id;
+    const suffix = oldId.slice(oldId.lastIndexOf("-") + 1);
+
+    const claim = await app.fetch(
+      new Request(`http://share.test/api/uploads/${oldId}/claim`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer owner" },
+        body: JSON.stringify({ name: "My Cool Demo" }),
+      }),
+    );
+    expect(claim.status).toBe(200);
+    const claimed = await claim.json();
+    expect(claimed.id).toBe(`my-cool-demo-${suffix}`);
+    expect(claimed.viewerUrl).toBe(`http://share.test/v/my-cool-demo-${suffix}`);
+
+    // Old id no longer resolves; new id serves the content.
+    const oldViewer = await app.fetch(new Request(`http://share.test/v/${oldId}`));
+    expect(oldViewer.status).toBe(404);
+    const newContent = await app.fetch(new Request(`http://share.test/content/${claimed.id}/`));
+    expect(newContent.status).toBe(200);
+    expect(await newContent.text()).toContain("Claim me");
+  });
+
+  test("claim requires the edit token", async () => {
+    const { app } = await testApp();
+    const payload = await (
+      await uploadFile(app, new File(["<h1>Locked</h1>"], "index.html", { type: "text/html" }), {
+        editToken: "secret",
+      })
+    ).json();
+
+    const unauth = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/claim`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "mine" }),
+      }),
+    );
+    expect(unauth.status).toBe(401);
+  });
+
+  test("claim rejects an unusable name", async () => {
+    const { app } = await testApp();
+    const payload = await (
+      await uploadFile(app, new File(["<h1>x</h1>"], "index.html", { type: "text/html" }), {
+        editToken: "owner",
+      })
+    ).json();
+
+    const bad = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/claim`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer owner" },
+        body: JSON.stringify({ name: "!!!" }),
+      }),
+    );
+    expect(bad.status).toBe(400);
+    expect(await bad.json()).toMatchObject({ code: "invalid_name" });
+  });
+
+  test("claiming the same prefix twice is a no-op", async () => {
+    const { app } = await testApp();
+    const payload = await (
+      await uploadFile(app, new File(["<h1>x</h1>"], "index.html", { type: "text/html" }), {
+        editToken: "owner",
+      })
+    ).json();
+
+    const first = await (
+      await app.fetch(
+        new Request(`http://share.test/api/uploads/${payload.id}/claim`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: "Bearer owner" },
+          body: JSON.stringify({ name: "demo" }),
+        }),
+      )
+    ).json();
+
+    const second = await (
+      await app.fetch(
+        new Request(`http://share.test/api/uploads/${first.id}/claim`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: "Bearer owner" },
+          body: JSON.stringify({ name: "demo" }),
+        }),
+      )
+    ).json();
+
+    expect(second.id).toBe(first.id);
   });
 });
 

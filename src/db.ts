@@ -32,29 +32,12 @@ export class UploadsRepository {
   }
 
   private ensureSchema(): void {
-    const existing = this.db
-      .query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'uploads'")
-      .get() as { sql: string } | null;
-
-    if (!existing) {
-      this.createUploadsTable();
-    } else if (!existing.sql.includes("'resources'")) {
-      this.migrateUploadKindConstraint();
-    }
-
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_uploads_expires_at ON uploads(expires_at);
-      CREATE INDEX IF NOT EXISTS idx_uploads_status ON uploads(status);
-    `);
-  }
-
-  private createUploadsTable(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS uploads (
         id TEXT PRIMARY KEY,
         title TEXT NULL,
         original_filename TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK (kind IN ('html', 'zip', 'resources')),
+        kind TEXT NOT NULL CHECK (kind IN ('html', 'zip', 'resources', 'bundle')),
         status TEXT NOT NULL CHECK (status IN ('ready', 'failed', 'expired', 'deleted')),
         sha256 TEXT NOT NULL,
         upload_bytes INTEGER NOT NULL,
@@ -66,28 +49,8 @@ export class UploadsRepository {
         deleted_at TEXT NULL,
         metadata_json TEXT NULL
       );
-    `);
-  }
-
-  private migrateUploadKindConstraint(): void {
-    this.db.exec(`
-      DROP INDEX IF EXISTS idx_uploads_expires_at;
-      DROP INDEX IF EXISTS idx_uploads_status;
-      ALTER TABLE uploads RENAME TO uploads_old_kind_migration;
-    `);
-    this.createUploadsTable();
-    this.db.exec(`
-      INSERT INTO uploads (
-        id, title, original_filename, kind, status, sha256, upload_bytes,
-        extracted_bytes, file_count, storage_path, created_at, expires_at,
-        deleted_at, metadata_json
-      )
-      SELECT
-        id, title, original_filename, kind, status, sha256, upload_bytes,
-        extracted_bytes, file_count, storage_path, created_at, expires_at,
-        deleted_at, metadata_json
-      FROM uploads_old_kind_migration;
-      DROP TABLE uploads_old_kind_migration;
+      CREATE INDEX IF NOT EXISTS idx_uploads_expires_at ON uploads(expires_at);
+      CREATE INDEX IF NOT EXISTS idx_uploads_status ON uploads(status);
     `);
   }
 
@@ -151,6 +114,15 @@ export class UploadsRepository {
           WHERE id = ? AND status = 'ready'`,
       )
       .run(values.sha256, values.extractedBytes, values.fileCount, values.metadataJson, id);
+  }
+
+  // Reassigns a share's id (and matching storage path) when its friendly prefix is
+  // claimed. The id is the primary key; SQLite permits updating it and there are no
+  // foreign keys referencing uploads.
+  rename(oldId: string, newId: string, newStoragePath: string): void {
+    this.db
+      .query("UPDATE uploads SET id = ?, storage_path = ? WHERE id = ? AND status = 'ready'")
+      .run(newId, newStoragePath, oldId);
   }
 
   updateMetadata(id: string, metadataJson: string): void {

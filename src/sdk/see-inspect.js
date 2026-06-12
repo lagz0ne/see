@@ -44,14 +44,27 @@
 
   var scriptEl = document.currentScript;
 
+  // When the page is served as a `see` bundle, the platform injects window.__SEE_BUNDLE__
+  // (capabilities, tweak defs+values, inspect selectors). It takes precedence over the
+  // legacy in-page wiring (data attributes, TWEAK_DEFAULTS, window.SeeTweaks).
+  function bundleConfig() {
+    return window.__SEE_BUNDLE__ && typeof window.__SEE_BUNDLE__ === "object" ? window.__SEE_BUNDLE__ : null;
+  }
+
   function announcedCapabilities() {
-    var raw = (scriptEl && scriptEl.getAttribute("data-see-capabilities")) || "inspect";
-    var requested = raw
-      .split(",")
-      .map(function (value) {
-        return value.trim();
-      })
-      .filter(Boolean);
+    var bundle = bundleConfig();
+    var requested;
+    if (bundle && Array.isArray(bundle.capabilities)) {
+      requested = bundle.capabilities.slice();
+    } else {
+      var raw = (scriptEl && scriptEl.getAttribute("data-see-capabilities")) || "inspect";
+      requested = raw
+        .split(",")
+        .map(function (value) {
+          return value.trim();
+        })
+        .filter(Boolean);
+    }
     var result = [];
     for (var i = 0; i < requested.length; i += 1) {
       if (SDK_ALLOWED_CAPABILITIES.indexOf(requested[i]) !== -1 && result.indexOf(requested[i]) === -1) {
@@ -100,21 +113,52 @@
   // ---- inspect -------------------------------------------------------------
 
   function collectTargets() {
-    var nodes = document.querySelectorAll("[data-see-inspectable]");
     var targets = [];
-    for (var i = 0; i < nodes.length && targets.length < 200; i += 1) {
-      var el = nodes[i];
+    var seen = [];
+
+    function pushTarget(el, id, label) {
+      if (targets.length >= 200 || seen.indexOf(el) !== -1) {
+        return;
+      }
       var rect = el.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) {
-        continue;
+        return;
       }
+      seen.push(el);
       targets.push({
         // getBoundingClientRect is viewport-relative CSS px — exactly what the parent maps.
-        seeId: el.getAttribute("data-see-id") || "see-target-" + i,
-        seeLabel: el.getAttribute("data-see-label") || el.getAttribute("data-see-id") || el.tagName.toLowerCase(),
+        seeId: id || el.getAttribute("data-see-id") || "see-target-" + targets.length,
+        seeLabel: label || el.getAttribute("data-see-label") || el.getAttribute("data-see-id") || el.tagName.toLowerCase(),
         rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
       });
     }
+
+    // Legacy: elements marked in the page itself.
+    var nodes = document.querySelectorAll("[data-see-inspectable]");
+    for (var i = 0; i < nodes.length; i += 1) {
+      pushTarget(nodes[i]);
+    }
+
+    // Bundle: targets declared by selector in see.json.
+    var bundle = bundleConfig();
+    if (bundle && Array.isArray(bundle.inspect)) {
+      for (var j = 0; j < bundle.inspect.length; j += 1) {
+        var entry = bundle.inspect[j];
+        if (!entry || typeof entry.selector !== "string") {
+          continue;
+        }
+        var matched;
+        try {
+          matched = document.querySelectorAll(entry.selector);
+        } catch (error) {
+          continue; // invalid selector — skip
+        }
+        for (var m = 0; m < matched.length; m += 1) {
+          pushTarget(matched[m], entry.id, entry.label);
+        }
+      }
+    }
+
     return targets;
   }
 
@@ -178,6 +222,17 @@
   // Find the page's TWEAK_DEFAULTS — either on window, or parsed from the EDITMODE-marked inline
   // script. The SDK runs in the page, so reading its own inline scripts is allowed.
   function readTweakDefaults() {
+    // Bundle takes precedence: its tweaks map carries each value alongside the control def.
+    var bundle = bundleConfig();
+    if (bundle && bundle.tweaks && typeof bundle.tweaks === "object") {
+      var defaults = {};
+      for (var key in bundle.tweaks) {
+        if (Object.prototype.hasOwnProperty.call(bundle.tweaks, key) && bundle.tweaks[key]) {
+          defaults[key] = bundle.tweaks[key].value;
+        }
+      }
+      return defaults;
+    }
     if (window.TWEAK_DEFAULTS && typeof window.TWEAK_DEFAULTS === "object") {
       return window.TWEAK_DEFAULTS;
     }
@@ -200,6 +255,12 @@
   }
 
   function tweakMeta(id) {
+    // Bundle def includes the control metadata (kind/min/max/cssVar/…); the extra `value`
+    // field is ignored by callers. Falls back to the page's window.SeeTweaks map.
+    var bundle = bundleConfig();
+    if (bundle && bundle.tweaks && bundle.tweaks[id]) {
+      return bundle.tweaks[id];
+    }
     return (window.SeeTweaks && typeof window.SeeTweaks === "object" && window.SeeTweaks[id]) || {};
   }
 

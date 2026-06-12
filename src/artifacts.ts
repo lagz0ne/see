@@ -4,8 +4,10 @@ import { Buffer } from "node:buffer";
 import type { AppConfig } from "./config";
 import { mimeTypeForPath } from "./mime";
 import { extractZipArtifact } from "./zip";
+import { MANIFEST_FILENAME } from "./bundle";
 import { renderGeneratedIndex } from "./generated-index";
 import { copyBytes } from "./lib/bytes";
+import { buildShareId, generateArtifactId, generateSuffix } from "./names";
 import { AppError, type ResourceInfo, type StoredArtifact, type UploadKind } from "./types";
 
 const HTML_EXTENSIONS = new Set([".html", ".htm"]);
@@ -49,11 +51,17 @@ export async function storeUploadedArtifact(config: AppConfig, input: File | Fil
       files.length === 1
         ? await storeSingleInitialArtifact(config, files[0], tempDir, uploadBytes)
         : await storeInitialResourceSet(config, files, tempDir, uploadBytes);
+    // A root see.json promotes the upload to a first-class bundle. (A single .html upload
+    // is stored as index.html and can never carry a manifest, so this only hits zip/resources.)
+    const kind = artifact.resources.some((resource) => resource.path === MANIFEST_FILENAME)
+      ? "bundle"
+      : artifact.kind;
     await rename(tempDir, finalDir);
     return {
       id,
       storagePath: id,
       ...artifact,
+      kind,
     };
   } catch (error) {
     await rm(tempDir, { recursive: true, force: true });
@@ -136,10 +144,6 @@ export function normalizeResourcePath(rawName: string, maxPathDepth: number): st
     throw new AppError(400, "resource_path_too_deep", `Resource path exceeds ${maxPathDepth} segments`);
   }
   return parts.join("/");
-}
-
-export function randomArtifactId(): string {
-  return `u_${randomBase64Url(9)}`;
 }
 
 export function randomEditToken(): string {
@@ -380,16 +384,53 @@ function summarizeResources(resources: ResourceInfo[]): { extractedBytes: number
   };
 }
 
+async function artifactDirExists(storageDir: string, id: string): Promise<boolean> {
+  try {
+    await access(join(storageDir, id));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function allocateArtifactId(storageDir: string): Promise<string> {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const id = randomArtifactId();
-    try {
-      await access(join(storageDir, id));
-    } catch {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const id = generateArtifactId();
+    if (!(await artifactDirExists(storageDir, id))) {
       return id;
     }
   }
   throw new AppError(500, "id_generation_failed", "Could not allocate a unique upload ID");
+}
+
+/**
+ * Finds a free id for a claimed prefix. Prefers `<prefix>-<preferredSuffix>` (so a
+ * claim keeps the share's existing suffix when possible); if that is taken, draws
+ * fresh suffixes until one is free. `taken` lets the caller veto ids that exist in
+ * the database even if no directory does.
+ */
+export async function allocateClaimedId(
+  storageDir: string,
+  prefix: string,
+  preferredSuffix: string,
+  taken: (id: string) => boolean = () => false,
+): Promise<string> {
+  const candidates = [preferredSuffix];
+  for (let i = 0; i < 8; i += 1) {
+    candidates.push(generateSuffix());
+  }
+  for (const suffix of candidates) {
+    const id = buildShareId(prefix, suffix);
+    if (!taken(id) && !(await artifactDirExists(storageDir, id))) {
+      return id;
+    }
+  }
+  throw new AppError(500, "id_generation_failed", "Could not allocate a unique name");
+}
+
+/** Renames a stored artifact directory (used when a share's prefix is claimed). */
+export async function renameArtifact(config: AppConfig, fromStoragePath: string, toStoragePath: string): Promise<void> {
+  await rename(join(config.storageDir, fromStoragePath), join(config.storageDir, toStoragePath));
 }
 
 function resolveResourceFile(root: string, resourcePath: string): string {

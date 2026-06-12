@@ -7,11 +7,42 @@ export type WorkspaceSettings = {
   tweaks?: Record<string, string | number | boolean>; // named design knobs with primitive values
 };
 
+// Per-tweak control metadata derived from a bundle's see.json (the *definitions*, minus
+// the current value, which lives in WorkspaceSettings.tweaks). Shapes match the SDK.
+export type TweakDef = {
+  kind?: string;      // toggle | number | color | text | select
+  label?: string;
+  group?: string;
+  min?: number;
+  max?: number;
+  step?: number;
+  unit?: string;
+  cssVar?: string;    // CSS custom property the SDK sets automatically
+  options?: string[]; // for kind: "select"
+};
+
+export type InspectTarget = {
+  selector: string;
+  id?: string;
+  label?: string;
+};
+
+// Manifest-derived extras the HTML injector forwards to the SDK for a bundle. Kept
+// separate from WorkspaceSettings so the workspace shape is unchanged.
+export type BundleState = {
+  capabilities: string[];                  // subset of ["inspect", "tweaks"]
+  tweakDefs?: Record<string, TweakDef>;
+  inspect?: InspectTarget[];
+};
+
 export type UploadMetadata = {
   editTokenHash?: string;
   revision?: number;
   workspace?: WorkspaceSettings;
+  bundle?: BundleState;
 };
+
+const ALLOWED_CAPABILITIES = ["inspect", "tweaks"];
 
 export function parseUploadMetadata(value: string | null): UploadMetadata {
   if (!value) {
@@ -54,14 +85,90 @@ export function parseUploadMetadata(value: string | null): UploadMetadata {
       }
     }
 
+    const bundle = parseBundleState(parsed["bundle"]);
+
     return {
       editTokenHash: typeof parsed["editTokenHash"] === "string" ? parsed["editTokenHash"] : undefined,
       revision: typeof revision === "number" && Number.isInteger(revision) && revision > 0 ? revision : undefined,
       ...(workspace !== undefined ? { workspace } : {}),
+      ...(bundle !== undefined ? { bundle } : {}),
     };
   } catch {
     return {};
   }
+}
+
+// Defensively re-read a persisted BundleState. It was validated strictly when written
+// (see src/bundle.ts), so we just drop anything malformed rather than re-validating.
+function parseBundleState(raw: unknown): BundleState | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return undefined;
+  }
+  const obj = raw as Record<string, unknown>;
+
+  const capabilities = Array.isArray(obj["capabilities"])
+    ? (obj["capabilities"] as unknown[]).filter(
+        (c): c is string => typeof c === "string" && ALLOWED_CAPABILITIES.includes(c),
+      )
+    : [];
+
+  let tweakDefs: Record<string, TweakDef> | undefined;
+  if (obj["tweakDefs"] && typeof obj["tweakDefs"] === "object" && !Array.isArray(obj["tweakDefs"])) {
+    const out: Record<string, TweakDef> = {};
+    for (const [key, value] of Object.entries(obj["tweakDefs"] as Record<string, unknown>)) {
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        out[key] = sanitizeTweakDef(value as Record<string, unknown>);
+      }
+    }
+    if (Object.keys(out).length > 0) {
+      tweakDefs = out;
+    }
+  }
+
+  let inspect: InspectTarget[] | undefined;
+  if (Array.isArray(obj["inspect"])) {
+    const out: InspectTarget[] = [];
+    for (const entry of obj["inspect"] as unknown[]) {
+      if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+        const e = entry as Record<string, unknown>;
+        if (typeof e["selector"] === "string") {
+          out.push({
+            selector: e["selector"],
+            ...(typeof e["id"] === "string" ? { id: e["id"] } : {}),
+            ...(typeof e["label"] === "string" ? { label: e["label"] } : {}),
+          });
+        }
+      }
+    }
+    if (out.length > 0) {
+      inspect = out;
+    }
+  }
+
+  if (capabilities.length === 0 && tweakDefs === undefined && inspect === undefined) {
+    return undefined;
+  }
+  return {
+    capabilities,
+    ...(tweakDefs !== undefined ? { tweakDefs } : {}),
+    ...(inspect !== undefined ? { inspect } : {}),
+  };
+}
+
+function sanitizeTweakDef(raw: Record<string, unknown>): TweakDef {
+  const def: TweakDef = {};
+  if (typeof raw["kind"] === "string") def.kind = raw["kind"];
+  if (typeof raw["label"] === "string") def.label = raw["label"];
+  if (typeof raw["group"] === "string") def.group = raw["group"];
+  if (typeof raw["min"] === "number") def.min = raw["min"];
+  if (typeof raw["max"] === "number") def.max = raw["max"];
+  if (typeof raw["step"] === "number") def.step = raw["step"];
+  if (typeof raw["unit"] === "string") def.unit = raw["unit"];
+  if (typeof raw["cssVar"] === "string") def.cssVar = raw["cssVar"];
+  if (Array.isArray(raw["options"]) && raw["options"].every((o) => typeof o === "string")) {
+    def.options = raw["options"] as string[];
+  }
+  return def;
 }
 
 export function serializeUploadMetadata(metadata: UploadMetadata): string {
@@ -77,6 +184,10 @@ export function uploadRevision(upload: UploadRecord): number {
 
 export function uploadWorkspace(upload: UploadRecord): WorkspaceSettings {
   return parseUploadMetadata(upload.metadataJson).workspace ?? {};
+}
+
+export function uploadBundle(upload: UploadRecord): BundleState | undefined {
+  return parseUploadMetadata(upload.metadataJson).bundle;
 }
 
 export function passwordRequired(upload: UploadRecord): boolean {

@@ -3,6 +3,16 @@
 Project guidance for Claude Code. The full agent instructions live in
 [`AGENTS.md`](AGENTS.md) — read that first.
 
+## Design system
+
+The locked visual identity ("Blueprint") lives in [`design.md`](design.md) at the repo
+root. **Read it before any UI work** — it is the source of truth for the warm-amber
+theme, Inter + mono typography, spacing, radius, motion, and CTA voice. Tokens are wired
+into shadcn variables in `src/client/styles.css` (portable copy in `tokens.css`); consume
+them by name and never inline raw OKLCH/hex. This is a system-managed project — every
+surface shares the system; amend `design.md` rather than overriding locally. See
+`AGENTS.md` § Design system for the full rules.
+
 ## Skills
 
 This project uses the **shadcn** skill (managed via `bunx skills`). Use it for any UI / component

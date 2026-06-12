@@ -264,9 +264,9 @@ Success response:
 
 ```json
 {
-  "id": "u_8mJ5pQvYx4",
-  "viewerUrl": "https://share.example.com/v/u_8mJ5pQvYx4",
-  "contentUrl": "https://content.share.example.com/u_8mJ5pQvYx4/",
+  "id": "mirovel-3f7k",
+  "viewerUrl": "https://share.example.com/v/mirovel-3f7k",
+  "contentUrl": "https://content.share.example.com/mirovel-3f7k/",
   "kind": "zip",
   "editToken": "t_randomEditTokenReturnedOnce",
   "revision": 1,
@@ -308,7 +308,7 @@ The viewer shell loads the uploaded app through an iframe. The initial iframe pa
 
 ```html
 <iframe
-  src="https://content.share.example.com/u_8mJ5pQvYx4/"
+  src="https://content.share.example.com/mirovel-3f7k/"
   sandbox="allow-scripts allow-forms allow-pointer-lock"
   referrerpolicy="no-referrer"
 ></iframe>
@@ -351,14 +351,14 @@ Success response:
 
 ```json
 {
-  "id": "u_8mJ5pQvYx4",
+  "id": "mirovel-3f7k",
   "title": "demo.zip",
   "kind": "zip",
   "createdAt": "2026-06-11T12:00:00Z",
   "expiresAt": "2026-06-18T12:00:00Z",
   "expired": false,
-  "contentRoot": "https://content.share.example.com/u_8mJ5pQvYx4/",
-  "contentUrl": "https://content.share.example.com/u_8mJ5pQvYx4/?v=1",
+  "contentRoot": "https://content.share.example.com/mirovel-3f7k/",
+  "contentUrl": "https://content.share.example.com/mirovel-3f7k/?v=1",
   "revision": 1,
   "resources": []
 }
@@ -389,6 +389,23 @@ Replaces one resource at the requested relative path with the raw request body. 
 
 Deletes one resource. Requires the edit token. The service rejects deleting the last remaining `index.html` or `index.htm`.
 
+### `POST /api/uploads/:id/claim`
+
+Renames the share to a memorable name. Body `{ "name": "my-cool-demo" }`; free text is
+slugified to lowercase `[a-z0-9-]` (max 32 chars). The new id is `<name>-<suffix>`, reusing
+the share's existing conflict-free suffix when it is free (otherwise a fresh one is drawn),
+so the friendly part never has to be globally unique. The old id stops resolving and live
+viewers receive a `renamed` event. Requires the edit token.
+
+```json
+{
+  "id": "my-cool-demo-3f7k",
+  "viewerUrl": "https://share.example.com/v/my-cool-demo-3f7k",
+  "contentUrl": "https://content.share.example.com/my-cool-demo-3f7k/",
+  "revision": 1
+}
+```
+
 ### `GET /healthz`
 
 Returns service health.
@@ -407,7 +424,7 @@ Table: `uploads`
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `id` | text primary key | Opaque random ID, not sequential |
+| `id` | text primary key | Friendly `<word>-<suffix>` slug (word is claimable; suffix keeps it conflict-free), not sequential |
 | `title` | text nullable | Display name |
 | `original_filename` | text | Original uploaded filename |
 | `kind` | text | `html` or `zip` |
@@ -437,7 +454,7 @@ Storage layout:
 /data
   /app.db
   /uploads
-    /u_8mJ5pQvYx4
+    /mirovel-3f7k
       /index.html
       /assets/app.css
       /assets/app.js
@@ -489,9 +506,21 @@ The viewer iframe must:
 
 Parent viewer must not:
 
-- Inject scripts into uploaded content in MVP.
+- Inject scripts into uploaded content in MVP, **except** the first-party `see` SDK for
+  bundles (see below).
 - Trust messages from the iframe unless an explicit postMessage protocol is added.
 - Expose admin or upload credentials to the iframe.
+
+Bundle injection exception (post-MVP):
+
+- A **bundle** is an upload containing a root `see.json` manifest. When a bundle opts into
+  capabilities, the content handler injects exactly two tags into served HTML: an inline
+  `window.__SEE_BUNDLE__` config blob and the first-party `/sdk/see-inspect.js` script.
+- This is scoped and deliberate: only the platform's own SDK is injected, only for
+  opted-in bundles, only into HTML documents, and only into content that is already
+  sandboxed without `allow-same-origin`. The SDK communicates solely via `postMessage`
+  and cannot script the parent. Uploaded scripts are never modified.
+- The `see.json` manifest schema for agents is documented in `/llms.txt`.
 
 ### HTTP Headers
 

@@ -4,6 +4,81 @@
 
 ---
 
+## Bundles (recommended)
+
+A **bundle** is the first-class way to ship an app to `see`: your static files (html,
+css, images, svg, json, …) **plus a root `see.json` manifest**. The manifest is the single
+source of truth for everything the platform offers, so you do **not** hand-wire anything in
+your HTML — no SDK `<script>` tag, no `data-see-*` attributes, no `TWEAK_DEFAULTS`, no
+`window.SeeTweaks`. Upload a zip or a file set that contains `see.json` at the root and the
+share is automatically a bundle: `see` reads the manifest and injects the first-party SDK
+into your served HTML for you.
+
+"Settings" is just editing the manifest — change `see.json` and the share updates.
+
+### `see.json`
+
+```json
+{
+  "homepage": "index.html",
+  "exposed": ["index.html", "docs.html"],
+  "bar": true,
+  "capabilities": ["inspect", "tweaks"],
+  "tweaks": {
+    "primaryColor": { "kind": "color",  "value": "#D97757", "cssVar": "--color-primary", "label": "Primary", "group": "Theme" },
+    "fontSize":     { "kind": "number", "value": 16, "min": 12, "max": 24, "step": 1, "unit": "px", "cssVar": "--font-size-base" },
+    "dark":         { "kind": "toggle", "value": false }
+  },
+  "inspect": [
+    { "selector": ".hero", "id": "hero", "label": "Hero section" },
+    { "selector": "header nav", "label": "Nav" }
+  ]
+}
+```
+
+| field | meaning |
+|-------|---------|
+| `homepage` | resource path served at the share root (must be an existing HTML page) |
+| `exposed` | HTML pages the viewer offers as navigable entry points (each must exist) |
+| `bar` | default visibility of the inspector bar (boolean) |
+| `capabilities` | subset of `["inspect", "tweaks"]` — only listed capabilities are wired |
+| `tweaks` | named design knobs; each has a `value` plus optional control metadata (see below) |
+| `inspect` | elements the bar can highlight/screenshot, addressed by CSS `selector` (+ optional `id`, `label`) |
+
+**Tweaks with zero page code.** Each tweak is `{ "value": …, … }`. The control kind is
+inferred from the value (`boolean`→toggle, `number`→slider, `#rrggbb`→color, else text) or
+set explicitly with `"kind"` (`toggle` | `number` | `color` | `text` | `select`). Other
+optional fields: `label`, `group`, `min`, `max`, `step`, `unit`, `options` (for `select`),
+and **`cssVar`**. If you set `cssVar`, the SDK applies the value by setting that CSS custom
+property on `:root` — so your CSS just consumes `var(--color-primary)` and the tweak works
+with no JavaScript. (Advanced: you may still define `applyLive(id, value)` in the page for
+tweaks that need JS.)
+
+**Inspect by selector.** List CSS selectors instead of sprinkling `data-see-inspectable`
+attributes; every matching element becomes an inspectable target.
+
+### Editing a bundle = patching `see.json`
+
+`see.json` is JSON, so use the structured patch API below to change settings surgically —
+no full re-upload. Every change bumps the revision and live-reloads open viewers:
+
+```json
+{ "ops": [
+  { "file": "see.json", "pointer": "/tweaks/primaryColor/value", "action": "set", "value": "#0A84FF" },
+  { "file": "see.json", "pointer": "/exposed/-",                  "action": "append", "value": "pricing.html" }
+] }
+```
+
+An invalid manifest is rejected loudly (HTTP 422 `invalid_manifest` on patch, 400 on
+upload/replace) and nothing is written. For bundles, the workspace Settings endpoint
+(`PATCH …/settings`) only accepts `password` — homepage/exposed/bar/tweaks are owned by
+`see.json`.
+
+The rest of this document describes the **legacy manual wiring** (in-HTML SDK tag, data
+attributes, `TWEAK_DEFAULTS`). You only need it if you are *not* shipping a bundle.
+
+---
+
 ## Opting in
 
 Add the SDK script tag to your page's `<head>` (or end of `<body>`):
@@ -114,6 +189,7 @@ A share is a living set of files — you can patch them over time and every open
 - `PATCH /api/uploads/{id}/resources/{path}` — replace one whole file. Body is the raw new contents. Bumps the revision.
 - `POST /api/uploads/{id}/resources` — add/replace files via multipart (`file`, optional `path`).
 - `DELETE /api/uploads/{id}/resources/{path}` — remove a file (an index page must remain).
+- `POST /api/uploads/{id}/claim` — rename the share to a memorable name. Body `{ "name": "my-cool-demo" }` (free text is slugified). The id becomes `<name>-<suffix>`, keeping the original conflict-free suffix, and the response returns `{ id, viewerUrl, contentUrl, revision }`. The old id stops resolving, so use the returned id afterwards. Requires the edit token.
 
 Authentication: send `Authorization: Bearer <password>` if the share has a password. If the owner cleared the password, edits are open (the link alone grants editing).
 

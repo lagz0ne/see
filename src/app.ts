@@ -4,29 +4,42 @@ import type { Server } from "bun";
 import type { AppConfig } from "./config";
 import {
   addOrReplaceResources,
+  allocateClaimedId,
   decodeResourcePathFromUrl,
   deleteArtifact,
   deleteResource,
   listResources,
   randomEditToken,
+  renameArtifact,
   sha256Text,
   storeUploadedArtifact,
   type ResourceWriteInput,
   type ResourceWriteSummary,
 } from "./artifacts";
+import { generateSuffix, normalizeClaimPrefix, SHARE_ID_PATTERN, splitShareId } from "./names";
 import { applyPatchBatch, MAX_OPS_PER_BATCH } from "./patch/apply";
 import type { RawOp } from "./patch/types";
 import { UploadsRepository } from "./db";
 import { mimeTypeForPath } from "./mime";
 import { errorPage, expiredPage, notFoundPage, uploadPage, viewerPage } from "./pages";
-import { parseUploadMetadata, passwordRequired, serializeUploadMetadata, uploadRevision, uploadWorkspace } from "./upload-metadata";
+import { deriveBundleState, MANIFEST_FILENAME, parseManifest, type BundleManifest } from "./bundle";
+import {
+  parseUploadMetadata,
+  passwordRequired,
+  serializeUploadMetadata,
+  uploadBundle,
+  uploadRevision,
+  uploadWorkspace,
+  type BundleState,
+  type WorkspaceSettings,
+} from "./upload-metadata";
 import { contentFrameSrc, contentOrigin, contentRootUrl, isContentHost, viewerUrl } from "./urls";
 import { AppError, type ResourceInfo, type UploadRecord } from "./types";
 import { eventBus } from "./events";
 
 type AppServer = Pick<Server<unknown>, "requestIP">;
 
-const ID_PATTERN = /^u_[A-Za-z0-9_-]{12}$/;
+const ID_PATTERN = SHARE_ID_PATTERN;
 const BUILT_ASSET_TYPES = new Map([
   ["app.css", "text/css; charset=utf-8"],
   ["app.js", "text/javascript; charset=utf-8"],
@@ -114,6 +127,14 @@ export function createApp(config: AppConfig): StaticShareApp {
       if (apiEventsMatch) {
         if (method === "GET") {
           return handleEvents(request, apiEventsMatch[1], repo);
+        }
+        return textResponse("Method Not Allowed", 405);
+      }
+
+      const apiClaimMatch = url.pathname.match(/^\/api\/uploads\/([^/]+)\/claim$/);
+      if (apiClaimMatch) {
+        if (method === "POST") {
+          return await handleClaimName(request, apiClaimMatch[1], repo, config);
         }
         return textResponse("Method Not Allowed", 405);
       }
@@ -217,6 +238,24 @@ async function handleUpload(
   const createdAt = new Date().toISOString();
   const expiresAt = new Date(Date.parse(createdAt) + config.retentionDays * 24 * 60 * 60 * 1000).toISOString();
 
+  // A bundle upload (root see.json) is validated strictly here: a malformed manifest
+  // rejects the whole upload so authors fail loudly. Clean the stored artifact on reject.
+  let bundleWorkspace: WorkspaceSettings | undefined;
+  let bundleState: BundleState | undefined;
+  if (artifact.kind === "bundle") {
+    try {
+      const manifest = await readManifest(config, artifact.storagePath);
+      if (manifest) {
+        const derived = deriveBundleState(manifest, htmlPagesOf(artifact.resources), { strict: true });
+        bundleWorkspace = Object.keys(derived.workspace).length > 0 ? derived.workspace : undefined;
+        bundleState = derived.bundle;
+      }
+    } catch (error) {
+      await deleteArtifact(config, artifact.storagePath);
+      throw error;
+    }
+  }
+
   const record: UploadRecord = {
     id: artifact.id,
     title,
@@ -231,7 +270,12 @@ async function handleUpload(
     createdAt,
     expiresAt,
     deletedAt: null,
-    metadataJson: serializeUploadMetadata({ editTokenHash, revision: 1 }),
+    metadataJson: serializeUploadMetadata({
+      editTokenHash,
+      revision: 1,
+      workspace: bundleWorkspace,
+      bundle: bundleState,
+    }),
   };
 
   try {
@@ -374,6 +418,19 @@ async function handlePatchSettings(request: Request, id: string, repo: UploadsRe
     body = (await request.json()) as Record<string, unknown>;
   } catch {
     throw new AppError(400, "invalid_json", "Body must be JSON");
+  }
+
+  // For a bundle, see.json owns homepage/exposed/bar/tweaks — settings come from editing
+  // the manifest. The password is not in the manifest, so it stays editable here.
+  if (upload.kind === "bundle") {
+    const managed = ["homepage", "exposed", "barDefault", "tweaks"].filter((key) => key in body);
+    if (managed.length > 0) {
+      throw new AppError(
+        400,
+        "bundle_managed",
+        `This share is a bundle — edit see.json to change ${managed.join(", ")}`,
+      );
+    }
   }
 
   // Compute htmlPages for validation
@@ -588,6 +645,86 @@ function handleEvents(request: Request, id: string, repo: UploadsRepository): Re
   });
 }
 
+function claimPayload(config: AppConfig, upload: UploadRecord) {
+  return {
+    id: upload.id,
+    viewerUrl: viewerUrl(config, upload.id),
+    contentUrl: contentRootUrl(config, upload.id),
+    revision: uploadRevision(upload),
+  };
+}
+
+// POST /api/uploads/:id/claim — owner picks a friendly prefix ("name") for the share.
+// The conflict-free suffix is preserved when possible so the id stays stable-ish.
+async function handleClaimName(
+  request: Request,
+  id: string,
+  repo: UploadsRepository,
+  config: AppConfig,
+): Promise<Response> {
+  if (!ID_PATTERN.test(id)) {
+    return jsonResponse({ error: "Upload not found", code: "not_found" }, 404);
+  }
+  const upload = repo.findById(id);
+  if (!upload) {
+    return jsonResponse({ error: "Upload not found", code: "not_found" }, 404);
+  }
+  if (isUploadExpired(upload)) {
+    markExpired(upload, repo);
+    return jsonResponse({ error: "Upload expired", code: "expired" }, 410);
+  }
+
+  // Renaming a share is an owner action — gate it behind the edit token.
+  await requireEditToken(request, upload);
+  rejectOversizedRequest(request, 64 * 1024, "claim_too_large");
+
+  let body: { name?: unknown };
+  try {
+    body = (await request.json()) as { name?: unknown };
+  } catch {
+    throw new AppError(400, "invalid_json", "Body must be JSON");
+  }
+
+  const prefix = normalizeClaimPrefix(body.name);
+  const current = splitShareId(upload.id);
+  if (current?.prefix === prefix) {
+    // Already claimed to this name — nothing to do.
+    return jsonResponse(claimPayload(config, upload));
+  }
+
+  const oldId = upload.id;
+  const oldStoragePath = upload.storagePath;
+  const newId = await allocateClaimedId(
+    config.storageDir,
+    prefix,
+    current?.suffix ?? generateSuffix(),
+    (candidate) => repo.findById(candidate) !== null,
+  );
+
+  await renameArtifact(config, oldStoragePath, newId);
+  try {
+    repo.rename(oldId, newId, newId);
+  } catch (error) {
+    // Roll back the directory move so the share stays reachable under its old id.
+    await renameArtifact(config, newId, oldStoragePath).catch(() => {});
+    throw error;
+  }
+  upload.id = newId;
+  upload.storagePath = newId;
+
+  // Nudge any live viewers on the old id to follow the rename.
+  eventBus.emit(oldId, {
+    type: "renamed",
+    id: newId,
+    viewerUrl: viewerUrl(config, newId),
+    contentUrl: contentRootUrl(config, newId),
+  });
+
+  logEvent("info", "share_claimed", { id: newId, previousId: oldId });
+
+  return jsonResponse(claimPayload(config, upload));
+}
+
 async function handlePatchBatch(
   request: Request,
   id: string,
@@ -644,6 +781,23 @@ async function handlePatchBatch(
     return jsonResponse({ ok: false, dryRun, code: "patch_failed", results: batch.results }, 422);
   }
 
+  // If the patch produces a new see.json, validate the resulting manifest loudly before
+  // writing (also surfaced on dryRun). Patches can only edit existing files, so the HTML
+  // page set is unchanged — validate against the current resource list.
+  for (const [file, content] of batch.outputs) {
+    if (decodeResourcePathFromUrl(file) !== MANIFEST_FILENAME) {
+      continue;
+    }
+    try {
+      const manifest = parseManifest(content);
+      deriveBundleState(manifest, htmlPagesOf(await listResources(config, upload.storagePath)), { strict: true });
+    } catch (error) {
+      const message = error instanceof AppError ? error.message : "see.json is invalid";
+      return jsonResponse({ ok: false, dryRun, code: "invalid_manifest", error: message, results: batch.results }, 422);
+    }
+    break;
+  }
+
   if (dryRun || batch.outputs.size === 0) {
     // Dry run, or every op legitimately matched zero nodes — report without writing.
     return jsonResponse({ ok: true, dryRun, revision: uploadRevision(upload), changed: [], results: batch.results });
@@ -656,7 +810,7 @@ async function handlePatchBatch(
     inputs.push({ file: f, path: decoded });
   }
   const summary = await addOrReplaceResources(config, upload.storagePath, inputs);
-  const payload = persistResourceMutation(repo, config, upload, summary);
+  const payload = await persistResourceMutation(repo, config, upload, summary);
 
   logEvent("info", "resource_patch_batch_success", {
     id: upload.id,
@@ -731,7 +885,7 @@ async function handleResourceRequest(
       upload.storagePath,
       files.map((file, index) => ({ file, path: index === 0 ? requestedPath : null })),
     );
-    const payload = persistResourceMutation(repo, config, upload, summary);
+    const payload = await persistResourceMutation(repo, config, upload, summary);
     logEvent("info", "resource_upload_success", {
       id: upload.id,
       fileCount: payload.fileCount,
@@ -748,11 +902,16 @@ async function handleResourceRequest(
     if (bytes.byteLength > config.maxExtractedFileBytes) {
       throw new AppError(413, "resource_too_large", `Resource exceeds ${config.maxExtractedFileBytes} bytes`);
     }
+    // Replacing a bundle's see.json: validate the new manifest loudly before writing.
+    if (decodedPath === MANIFEST_FILENAME) {
+      const manifest = parseManifest(new TextDecoder().decode(bytes));
+      deriveBundleState(manifest, htmlPagesOf(await listResources(config, upload.storagePath)), { strict: true });
+    }
     const file = new File([bytes], decodedPath.split("/").pop() || "resource", {
       type: request.headers.get("content-type") || "",
     });
     const summary = await addOrReplaceResources(config, upload.storagePath, [{ file, path: decodedPath }]);
-    const payload = persistResourceMutation(repo, config, upload, summary);
+    const payload = await persistResourceMutation(repo, config, upload, summary);
     logEvent("info", "resource_patch_success", {
       id: upload.id,
       path: decodedPath,
@@ -765,7 +924,7 @@ async function handleResourceRequest(
   if (method === "DELETE" && resourcePath) {
     const decodedPath = decodeResourcePathFromUrl(resourcePath);
     const summary = await deleteResource(config, upload.storagePath, decodedPath);
-    const payload = persistResourceMutation(repo, config, upload, summary);
+    const payload = await persistResourceMutation(repo, config, upload, summary);
     logEvent("info", "resource_delete_success", {
       id: upload.id,
       path: decodedPath,
@@ -825,10 +984,11 @@ async function handleContentRequest(
   }
 
   const info = await stat(filePath);
+  const contentType = mimeTypeForPath(filePath);
   const etag = contentEtag(upload, info.size, info.mtimeMs);
-  const headers = {
+  const headers: Record<string, string> = {
     ...contentHeaders(),
-    "Content-Type": mimeTypeForPath(filePath),
+    "Content-Type": contentType,
     ETag: etag,
     "Last-Modified": info.mtime.toUTCString(),
   };
@@ -839,7 +999,21 @@ async function handleContentRequest(
     });
   }
 
-  const file = Bun.file(filePath, { type: mimeTypeForPath(filePath) });
+  // Bundle wiring: when this is a bundle that opted into capabilities and we are serving
+  // an HTML document, inject the first-party SDK + its config. This is the one place the
+  // platform writes into uploaded content — only our own SDK, only for opted-in bundles,
+  // only into sandboxed (no allow-same-origin) HTML.
+  const bundle = upload.kind === "bundle" ? uploadBundle(upload) : undefined;
+  if (bundle && bundle.capabilities.length > 0 && contentType.startsWith("text/html")) {
+    const html = await Bun.file(filePath).text();
+    const snippet = bundleInjectionSnippet(config, uploadWorkspace(upload), bundle);
+    const injected = await injectBundleSdk(html, snippet);
+    // Content-Length now reflects the rewritten body; ETag still keys on revision (which
+    // bumps whenever see.json changes), so caches invalidate correctly.
+    return new Response(injected, { status: 200, headers });
+  }
+
+  const file = Bun.file(filePath, { type: contentType });
   return new Response(file, {
     status: 200,
     headers,
@@ -1100,6 +1274,102 @@ function formString(formData: FormData, name: string, maxLength: number): string
   return value.trim().slice(0, maxLength);
 }
 
+function htmlPagesOf(resources: ResourceInfo[]): string[] {
+  return resources
+    .map((resource) => resource.path)
+    .filter((path) => /\.(html|htm)$/i.test(path))
+    .sort();
+}
+
+// Read + parse a bundle's root see.json. Returns null when there is no manifest. Throws
+// AppError(invalid_manifest) on malformed JSON/schema (caller decides loud vs. lenient).
+async function readManifest(config: AppConfig, storagePath: string): Promise<BundleManifest | null> {
+  const file = Bun.file(join(resolve(config.storageDir, storagePath), MANIFEST_FILENAME));
+  if (!(await file.exists())) {
+    return null;
+  }
+  return parseManifest(await file.text());
+}
+
+// Re-derive workspace + bundle state from see.json after a mutation. Lenient: a malformed
+// or stale manifest never throws here (loud validation happens pre-write in the editing
+// paths) — it keeps the previous state so a write is never left half-applied.
+async function rederiveManifestState(
+  config: AppConfig,
+  storagePath: string,
+  resources: ResourceInfo[],
+  previous: { workspace?: WorkspaceSettings; bundle?: BundleState },
+): Promise<{ workspace?: WorkspaceSettings; bundle?: BundleState }> {
+  try {
+    const manifest = await readManifest(config, storagePath);
+    if (!manifest) {
+      return previous;
+    }
+    const derived = deriveBundleState(manifest, htmlPagesOf(resources), { strict: false });
+    return {
+      workspace: Object.keys(derived.workspace).length > 0 ? derived.workspace : undefined,
+      bundle: derived.bundle,
+    };
+  } catch (error) {
+    logEvent("warn", "manifest_rederive_failed", {
+      storagePath,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return previous;
+  }
+}
+
+// Build the <head> snippet that wires the first-party SDK into a bundle's served HTML:
+// an inline config the SDK reads (capabilities, tweak defs+values, inspect targets) plus
+// the SDK <script> loaded absolutely from the public origin.
+function bundleInjectionSnippet(config: AppConfig, workspace: WorkspaceSettings, bundle: BundleState): string {
+  const tweakValues = workspace.tweaks ?? {};
+  const tweakDefs = bundle.tweakDefs ?? {};
+  const tweaks: Record<string, unknown> = {};
+  for (const [id, value] of Object.entries(tweakValues)) {
+    tweaks[id] = { ...(tweakDefs[id] ?? {}), value };
+  }
+  const payload = {
+    capabilities: bundle.capabilities,
+    ...(Object.keys(tweaks).length > 0 ? { tweaks } : {}),
+    ...(bundle.inspect && bundle.inspect.length > 0 ? { inspect: bundle.inspect } : {}),
+  };
+  // Escape "<" so the JSON can never break out of the <script> element (</script>, <!--).
+  const json = JSON.stringify(payload).replace(/</g, "\\u003c");
+  const sdkUrl = `${config.publicBaseUrl}/sdk/see-inspect.js`;
+  return `<script>window.__SEE_BUNDLE__=${json};</script><script src="${sdkUrl}"></script>`;
+}
+
+// Inject the snippet into served HTML using HTMLRewriter (safe on malformed markup).
+// Prefers <head>; falls back to the start of <body>, then to prepending the document.
+async function injectBundleSdk(html: string, snippet: string): Promise<string> {
+  let injected = false;
+  const headPass = new HTMLRewriter()
+    .on("head", {
+      element(el) {
+        el.append(snippet, { html: true });
+        injected = true;
+      },
+    })
+    .transform(new Response(html));
+  let out = await headPass.text();
+  if (injected) {
+    return out;
+  }
+
+  injected = false;
+  const bodyPass = new HTMLRewriter()
+    .on("body", {
+      element(el) {
+        el.prepend(snippet, { html: true });
+        injected = true;
+      },
+    })
+    .transform(new Response(out));
+  out = await bodyPass.text();
+  return injected ? out : snippet + out;
+}
+
 function resourceListPayload(config: AppConfig, upload: UploadRecord, resources: ResourceInfo[]) {
   const revision = uploadRevision(upload);
   return {
@@ -1113,7 +1383,7 @@ function resourceListPayload(config: AppConfig, upload: UploadRecord, resources:
   };
 }
 
-function persistResourceMutation(
+async function persistResourceMutation(
   repo: UploadsRepository,
   config: AppConfig,
   upload: UploadRecord,
@@ -1121,7 +1391,13 @@ function persistResourceMutation(
 ) {
   const metadata = parseUploadMetadata(upload.metadataJson);
   const revision = (metadata.revision ?? 1) + 1;
-  const metadataJson = serializeUploadMetadata({ ...metadata, revision });
+  // Bundles: see.json is the source of truth, so re-derive workspace + bundle state on
+  // every change. Non-bundles keep their existing workspace untouched.
+  const { workspace, bundle } = await rederiveManifestState(config, upload.storagePath, summary.resources, {
+    workspace: metadata.workspace,
+    bundle: metadata.bundle,
+  });
+  const metadataJson = serializeUploadMetadata({ ...metadata, revision, workspace, bundle });
   repo.updateMutableState(upload.id, {
     sha256: summary.sha256,
     extractedBytes: summary.extractedBytes,
