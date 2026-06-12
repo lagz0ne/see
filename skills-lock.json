@@ -1,11 +1,29 @@
 {
   "version": 1,
   "skills": {
+    "efficient-fable": {
+      "source": "builderio/skills",
+      "sourceType": "github",
+      "skillPath": "skills/efficient-fable/SKILL.md",
+      "computedHash": "0f92029f08ae7350a9a6655e89a43aff69e1399d64a76267c69f62338e218ac8"
+    },
+    "hallmark": {
+      "source": "builderio/builder-agent-skills",
+      "sourceType": "github",
+      "skillPath": "hallmark/SKILL.md",
+      "computedHash": "7b029a81f7873b7448c690e586af52965a9fe402bb188f309f212fefbd48eb68"
+    },
     "shadcn": {
       "source": "shadcn/ui",
       "sourceType": "github",
       "skillPath": "skills/shadcn/SKILL.md",
       "computedHash": "ac9d0d69caac7de1d1e5647f3db3bcd2f13af355d6b3a78780fbf7fc80e8dca0"
+    },
+    "visual-plan": {
+      "source": "builderio/skills",
+      "sourceType": "github",
+      "skillPath": "skills/visual-plan/SKILL.md",
+      "computedHash": "cac5dce18f159718e5c6364d568ec5b01248f93b6fbc9dfc7d8094e3969a5891"
     }
   }
 }
