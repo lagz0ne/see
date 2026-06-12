@@ -3,17 +3,38 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>see-inspect demo</title>
-    <!--
-      Opt into the inspector capability protocol.
+    <title>see-inspect + tweaks demo</title>
 
-      Root-relative works when content is served from the same host as the viewer
-      (the default /content/:id/ setup). If you serve content from a SEPARATE
-      CONTENT_BASE_URL origin, use the absolute public URL instead, e.g.:
-        <script src="https://your-see-host/sdk/see-inspect.js" data-see-capabilities="inspect"></script>
+    <!-- Tweak defaults — one root inline script, valid JSON between the EDITMODE markers. -->
+    <script>
+      const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{ "primaryColor": "#f08a24", "radius": 12, "dark": false, "variant": "A" }/*EDITMODE-END*/;
+
+      // Optional: enrich the controls the inspector bar renders (ranges, units, options, cssVar).
+      window.SeeTweaks = {
+        primaryColor: { kind: "color", label: "Accent", cssVar: "--accent", group: "Color" },
+        radius: { kind: "number", label: "Corner radius", min: 0, max: 28, step: 1, unit: "px", group: "Shape" },
+        dark: { kind: "toggle", label: "Dark mode", group: "Color" },
+        variant: { kind: "select", label: "Layout", options: ["A", "B", "C"], group: "Shape" },
+      };
+
+      // Apply a tweak live. The SDK calls this whenever a control changes (and on saved values).
+      function applyLive(id, value) {
+        const root = document.documentElement;
+        if (id === "primaryColor") root.style.setProperty("--accent", value);
+        else if (id === "radius") root.style.setProperty("--radius", value + "px");
+        else if (id === "dark") root.classList.toggle("dark", !!value);
+        else if (id === "variant") root.setAttribute("data-variant", value);
+      }
+    </script>
+
+    <!--
+      Opt into the capability protocol. Root-relative works when content is same-host; for a
+      separate CONTENT_BASE_URL origin use the absolute public URL.
     -->
-    <script src="/sdk/see-inspect.js" data-see-capabilities="inspect"></script>
+    <script src="/sdk/see-inspect.js" data-see-capabilities="inspect,tweaks"></script>
+
     <style>
+      :root { --accent: #f08a24; --radius: 12px; }
       body {
         margin: 0;
         font-family: system-ui, sans-serif;
@@ -21,28 +42,32 @@
         color: #2b2b2b;
         padding: 2rem;
       }
+      .dark body, html.dark body { background: #1c1917; color: #f5f5f4; }
       h1 { margin-top: 0; }
       .card {
         border: 1px solid #e5d8c5;
-        border-radius: 12px;
+        border-radius: var(--radius);
         padding: 1.5rem;
         margin: 1rem 0;
         background: #fff;
       }
+      html.dark .card { background: #292524; border-color: #44403c; }
       .hero {
-        background: linear-gradient(135deg, #f6b73c, #f08a24);
+        background: var(--accent);
         color: #fff;
         border: none;
       }
+      button { background: var(--accent); color: #fff; border: none; border-radius: var(--radius); padding: .6rem 1rem; }
     </style>
   </head>
   <body>
-    <h1>see-inspect demo</h1>
-    <p>Open this share in the viewer, then click the crosshair “Inspect page” button in the bar.</p>
+    <h1>see-inspect + tweaks demo</h1>
+    <p>In the viewer bar: click the crosshair (or press <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd>) to inspect, and the sliders icon to open Tweaks.</p>
 
     <section class="card hero" data-see-inspectable data-see-id="hero" data-see-label="Hero banner">
       <h2>Hero banner</h2>
-      <p>Marked with <code>data-see-inspectable</code>. Click it in inspect mode, then Capture.</p>
+      <p>Inspectable region. Drag the Accent / Radius / Dark / Layout controls in the Tweaks panel and watch this update live.</p>
+      <button>Accent button</button>
     </section>
 
     <section class="card" data-see-inspectable data-see-id="pricing" data-see-label="Pricing card">

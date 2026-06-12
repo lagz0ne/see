@@ -16,6 +16,7 @@ import {
   RotateCwIcon,
   Settings2Icon,
   SettingsIcon,
+  SlidersHorizontalIcon,
   SunIcon,
   Trash2Icon,
   UploadCloudIcon,
@@ -70,8 +71,10 @@ import { cn } from "@/lib/utils";
 import { CapturePreview } from "./inspector/CapturePreview";
 import { InspectOverlay, type Selection } from "./inspector/InspectOverlay";
 import { CaptureError, type CaptureResult, DisplayCapture, contentRectToParentRect, supportsDisplayCapture } from "./inspector/captureSelection";
+import type { TweakValue } from "./inspector/protocol";
 import { useInspectChannel } from "./inspector/useInspectChannel";
 import { SettingsPanel } from "./settings/SettingsPanel";
+import { TweaksPanel, currentTweakValues } from "./settings/TweaksPanel";
 
 type StaticShareAppProps = {
   root: HTMLElement;
@@ -559,9 +562,15 @@ function ViewerApp({ root }: StaticShareAppProps) {
   const [currentPage, setCurrentPage] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const contentOrigin = root.dataset.contentOrigin || window.location.origin;
-  const { granted, targets, enableInspect, disableInspect } = useInspectChannel(iframeRef, contentOrigin);
+  const { granted, targets, tweaks, enableInspect, disableInspect, setTweak, requestHello } = useInspectChannel(
+    iframeRef,
+    contentOrigin,
+  );
   const inspectAvailable = granted.has("inspect");
+  const tweaksAvailable = granted.has("tweaks");
   const captureSupported = supportsDisplayCapture();
+  const savedTweaks = useMemo(() => parseSavedTweaks(root.dataset.tweaks), [root.dataset.tweaks]);
+  const savedTweaksAppliedRef = useRef(false);
   const [inspectMode, setInspectMode] = useState(false);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [captureResult, setCaptureResult] = useState<CaptureResult | null>(null);
@@ -621,6 +630,29 @@ function ViewerApp({ root }: StaticShareAppProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inspectAvailable]);
 
+  // Push the share's saved tweak values to the page once its schema arrives, so every visitor
+  // sees the saved design. Re-applies if the iframe navigates and re-announces.
+  useEffect(() => {
+    if (tweaks.length === 0) {
+      savedTweaksAppliedRef.current = false;
+      return;
+    }
+    if (savedTweaksAppliedRef.current || !savedTweaks) {
+      return;
+    }
+    const ids = new Set(tweaks.map((tweak) => tweak.id));
+    let applied = false;
+    for (const [id, value] of Object.entries(savedTweaks)) {
+      if (ids.has(id)) {
+        setTweak(id, value);
+        applied = true;
+      }
+    }
+    if (applied) {
+      savedTweaksAppliedRef.current = true;
+    }
+  }, [tweaks, savedTweaks, setTweak]);
+
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
     return () => document.documentElement.classList.remove("dark");
@@ -632,6 +664,14 @@ function ViewerApp({ root }: StaticShareAppProps) {
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      // Alt+Shift+I reveals the inspectable layer (when the page supports inspect).
+      if (event.altKey && event.shiftKey && (event.key === "I" || event.key === "i")) {
+        if (inspectAvailable) {
+          event.preventDefault();
+          toggleInspect();
+        }
+        return;
+      }
       if (event.key !== "Escape") {
         return;
       }
@@ -646,7 +686,7 @@ function ViewerApp({ root }: StaticShareAppProps) {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [controlsVisible, inspectMode]);
+  }, [controlsVisible, inspectMode, inspectAvailable]);
 
   useEffect(() => {
     const element = stageRef.current;
@@ -853,6 +893,22 @@ function ViewerApp({ root }: StaticShareAppProps) {
                 <CameraIcon data-icon="inline-start" />
               </TooltipButton>
             ) : null}
+            {tweaksAvailable ? (
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" size="icon-sm" aria-label="Tweaks">
+                    <SlidersHorizontalIcon data-icon="inline-start" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="end" className="w-[min(calc(100vw-1rem),24rem)] gap-3 overflow-y-auto p-3" style={{ maxHeight: "min(80vh, 560px)" }}>
+                  <PopoverHeader>
+                    <PopoverTitle>Tweaks</PopoverTitle>
+                    <PopoverDescription>Live design controls. Save them in Settings to keep them.</PopoverDescription>
+                  </PopoverHeader>
+                  <TweaksPanel tweaks={tweaks} onChange={setTweak} />
+                </PopoverContent>
+              </Popover>
+            ) : null}
             <Popover>
               <PopoverTrigger asChild>
                 <Button variant="outline" size="icon-sm" aria-label="Viewer controls">
@@ -985,6 +1041,7 @@ function ViewerApp({ root }: StaticShareAppProps) {
                   uploadId={uploadId}
                   contentRoot={contentRoot}
                   resourceRevision={resourceRevision}
+                  currentTweaks={tweaksAvailable ? currentTweakValues(tweaks) : undefined}
                   onHomeChanged={() => {
                     // re-fetch settings and navigate to the new homepage
                     void fetch(`/api/uploads/${uploadId}/settings`, { cache: "no-store" })
@@ -1085,6 +1142,7 @@ function ViewerApp({ root }: StaticShareAppProps) {
                 ref={iframeRef}
                 title="Uploaded app"
                 src={frameSrc}
+                onLoad={requestHello}
                 sandbox="allow-scripts allow-forms allow-pointer-lock"
                 referrerPolicy="no-referrer"
                 className="block size-full border-0 bg-background"
@@ -1609,4 +1667,27 @@ function clamp(value: number, min: number, max: number): number {
     return min;
   }
   return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+// Parse the share's saved tweak values from the `data-tweaks` attribute (JSON object of
+// primitives). Returns null when absent or malformed.
+function parseSavedTweaks(value: string | undefined): Record<string, TweakValue> | null {
+  if (!value) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const result: Record<string, TweakValue> = {};
+    for (const [key, raw] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof raw === "string" || typeof raw === "number" || typeof raw === "boolean") {
+        result[key] = raw;
+      }
+    }
+    return Object.keys(result).length > 0 ? result : null;
+  } catch {
+    return null;
+  }
 }

@@ -1,0 +1,103 @@
+# see — inspector capability protocol
+
+`see` hosts uploaded static apps in a sandboxed viewer with an inspector bar that can talk to the page via an opt-in capability protocol.
+
+---
+
+## Opting in
+
+Add the SDK script tag to your page's `<head>` (or end of `<body>`):
+
+```html
+<script src="/sdk/see-inspect.js" data-see-capabilities="inspect,tweaks"></script>
+```
+
+Use a root-relative URL (`/sdk/see-inspect.js`) when your content is served from the same host. If you know the absolute public URL of the host, use that instead. The script is safe to include: it communicates only via `postMessage` and the page can never script the host.
+
+You may list one or both capabilities in `data-see-capabilities`:
+
+- `inspect` — element inspection and screenshot
+- `tweaks` — live design controls in the bar
+
+---
+
+## inspect capability
+
+Mark any element you want the bar to be able to highlight, select, and screenshot:
+
+```html
+<div data-see-inspectable data-see-id="hero" data-see-label="Hero section">…</div>
+```
+
+- `data-see-inspectable` — required; marks the element as a target
+- `data-see-id` — optional stable identifier for the element
+- `data-see-label` — optional human-readable label shown in the bar
+
+---
+
+## tweaks capability
+
+Tweaks are named design knobs (string, number, or boolean) that the bar exposes as live controls. The owner can save the current values in Settings so they persist across loads.
+
+### Declaring defaults
+
+Declare your tweak defaults in a single root-level inline script using edit-mode markers so the bar can parse and edit them:
+
+```html
+<script>
+  const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{ "primaryColor": "#D97757", "fontSize": 16, "dark": false, "variant": "A" }/*EDITMODE-END*/;
+</script>
+```
+
+Rules:
+- The value between the markers must be valid JSON with double-quoted keys and strings.
+- There must be exactly one `/*EDITMODE-BEGIN*/…/*EDITMODE-END*/` block in the page.
+- The bar infers control kinds from value types: `boolean` → toggle, `number` → slider/number input, a `#rrggbb` string → color picker, any other string → text input.
+
+### Enriching controls (optional)
+
+To customise labels, ranges, units, or control kinds, define a global `window.SeeTweaks` object keyed by tweak name:
+
+```html
+<script>
+  window.SeeTweaks = {
+    fontSize:     { kind: "number",  min: 12, max: 24, step: 1, unit: "px", label: "Font size", group: "Type" },
+    primaryColor: { kind: "color",   cssVar: "--color-primary" },
+    variant:      { kind: "select",  options: ["A", "B", "C"] },
+  };
+</script>
+```
+
+Supported metadata fields per tweak:
+
+| field | description |
+|-------|-------------|
+| `kind` | `"toggle"`, `"number"`, `"color"`, `"text"`, `"select"` — overrides the inferred kind |
+| `label` | display name shown in the bar |
+| `group` | group heading in the bar panel |
+| `min`, `max`, `step` | numeric range (for `kind: "number"`) |
+| `unit` | unit suffix displayed next to the value (e.g. `"px"`, `"rem"`) |
+| `cssVar` | CSS custom property to set automatically (e.g. `"--accent"`) — the SDK calls `document.documentElement.style.setProperty(cssVar, value)` |
+| `options` | array of allowed string values (for `kind: "select"`) |
+
+### Applying changes at runtime
+
+When the user moves a control, the bar calls `applyLive(id, value)` if it is defined on the page:
+
+```html
+<script>
+  function applyLive(id, value) {
+    if (id === "dark") {
+      document.body.classList.toggle("dark", value);
+    } else if (id === "fontSize") {
+      document.documentElement.style.setProperty("--font-size-base", value + "px");
+    }
+  }
+</script>
+```
+
+If you set `cssVar` in `window.SeeTweaks`, the SDK automatically sets that CSS variable and you do not need to handle it in `applyLive`.
+
+### Persistence
+
+Tweak values persist only if the share owner explicitly saves them in Settings (via the bar or the API). Saved tweaks are injected into the viewer page as `data-tweaks` on `#staticShareRoot` and forwarded to the page by the SDK before `applyLive` is called.

@@ -3,17 +3,29 @@
  *
  * Include it from the uploaded page with a single tag:
  *
- *   <script src="https://YOUR-SEE-HOST/sdk/see-inspect.js" data-see-capabilities="inspect"></script>
+ *   <script src="https://YOUR-SEE-HOST/sdk/see-inspect.js" data-see-capabilities="inspect,tweaks"></script>
  *
- * Then mark the elements you want the inspector bar to be able to select/capture:
+ * Capabilities (request the ones you use via data-see-capabilities):
  *
- *   <section data-see-inspectable data-see-id="hero" data-see-label="Hero banner"> ... </section>
+ *  • inspect — mark elements the inspector bar can highlight, select, and screenshot:
+ *      <section data-see-inspectable data-see-id="hero" data-see-label="Hero banner"> ... </section>
  *
- * The SDK runs inside the sandboxed, cross-origin iframe and talks to the parent viewer over
- * postMessage only — it can never read or script the parent. It announces a constrained,
- * hardcoded allowlist of capabilities; the parent intersects that with its own allowlist and
- * only ever surfaces matching tools (chrome-extension style). No data leaves the page except
- * the capability list and the bounding rectangles of elements you explicitly marked.
+ *  • tweaks — live design controls rendered in the inspector bar. Declare defaults in ONE
+ *    root-level inline script using edit-mode markers (Claude Design convention):
+ *      <script>
+ *        const TWEAK_DEFAULTS = /*EDITMODE-BEGIN* /{ "primaryColor": "#D97757", "fontSize": 16, "dark": false }/*EDITMODE-END* /;
+ *      </script>
+ *    The bar infers a control per value (boolean→toggle, number→slider, #hex→color, else text).
+ *    Optionally enrich with a global `window.SeeTweaks` map keyed by the same names
+ *    ({ fontSize: { kind:"number", min:12, max:24, step:1, unit:"px", label:"Font size", group:"Type" },
+ *       accent: { kind:"color", cssVar:"--accent" }, variant: { kind:"select", options:["A","B","C"] } }).
+ *    To apply a change, define `function applyLive(id, value){...}`; or set `cssVar` in SeeTweaks
+ *    metadata and the SDK sets that CSS variable for you.
+ *
+ * The SDK runs inside the sandboxed, cross-origin iframe and talks to the parent over postMessage
+ * only — it can never read or script the parent. The bar only ever surfaces capabilities it
+ * already understands. No data leaves the page except the capability list, the rects of elements
+ * you marked, and the tweak schema you declared.
  *
  * Keep NS / PROTO / SDK_ALLOWED_CAPABILITIES in sync with src/client/inspector/protocol.ts.
  */
@@ -23,7 +35,7 @@
   var NS = "see-inspect";
   var PROTO = 1;
   var SDK_VERSION = "1";
-  var SDK_ALLOWED_CAPABILITIES = ["inspect"];
+  var SDK_ALLOWED_CAPABILITIES = ["inspect", "tweaks"];
 
   // Only run inside an iframe.
   if (window.parent === window) {
@@ -50,10 +62,12 @@
   }
 
   var capabilities = announcedCapabilities();
+  var hasTweaks = capabilities.indexOf("tweaks") !== -1;
   var parentOrigin = null; // locked on first valid inbound parent message
   var inspectActive = false;
   var rafScheduled = false;
   var mutationObserver = null;
+  var tweakValues = loadSavedTweaks();
 
   function post(message, fallbackToWildcard) {
     var targetOrigin = parentOrigin || (fallbackToWildcard ? "*" : null);
@@ -82,6 +96,8 @@
       true,
     );
   }
+
+  // ---- inspect -------------------------------------------------------------
 
   function collectTargets() {
     var nodes = document.querySelectorAll("[data-see-inspectable]");
@@ -148,6 +164,159 @@
     }
   }
 
+  // ---- tweaks --------------------------------------------------------------
+
+  function loadSavedTweaks() {
+    try {
+      var saved = JSON.parse(localStorage.getItem("tweaks") || "{}");
+      return saved && typeof saved === "object" && !Array.isArray(saved) ? saved : {};
+    } catch (error) {
+      return {};
+    }
+  }
+
+  // Find the page's TWEAK_DEFAULTS — either on window, or parsed from the EDITMODE-marked inline
+  // script. The SDK runs in the page, so reading its own inline scripts is allowed.
+  function readTweakDefaults() {
+    if (window.TWEAK_DEFAULTS && typeof window.TWEAK_DEFAULTS === "object") {
+      return window.TWEAK_DEFAULTS;
+    }
+    var scripts = document.getElementsByTagName("script");
+    var begin = "/*EDITMODE-BEGIN*/";
+    var end = "/*EDITMODE-END*/";
+    for (var i = 0; i < scripts.length; i += 1) {
+      var text = scripts[i].textContent || "";
+      var b = text.indexOf(begin);
+      var e = text.indexOf(end);
+      if (b !== -1 && e !== -1 && e > b) {
+        try {
+          return JSON.parse(text.slice(b + begin.length, e));
+        } catch (error) {
+          return null;
+        }
+      }
+    }
+    return null;
+  }
+
+  function tweakMeta(id) {
+    return (window.SeeTweaks && typeof window.SeeTweaks === "object" && window.SeeTweaks[id]) || {};
+  }
+
+  function inferKind(value, meta) {
+    if (meta && typeof meta.kind === "string") {
+      return meta.kind;
+    }
+    if (meta && Array.isArray(meta.options)) {
+      return "select";
+    }
+    if (typeof value === "boolean") {
+      return "toggle";
+    }
+    if (typeof value === "number") {
+      return "number";
+    }
+    return /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(value) ? "color" : "text";
+  }
+
+  function titleCase(key) {
+    return key
+      .replace(/[-_]+/g, " ")
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/\b\w/g, function (c) {
+        return c.toUpperCase();
+      });
+  }
+
+  function buildTweakDefs() {
+    var defaults = readTweakDefaults();
+    if (!defaults || typeof defaults !== "object") {
+      return [];
+    }
+    var defs = [];
+    for (var key in defaults) {
+      if (!Object.prototype.hasOwnProperty.call(defaults, key)) {
+        continue;
+      }
+      var fallback = defaults[key];
+      if (typeof fallback !== "string" && typeof fallback !== "number" && typeof fallback !== "boolean") {
+        continue;
+      }
+      var meta = tweakMeta(key);
+      var current = Object.prototype.hasOwnProperty.call(tweakValues, key) ? tweakValues[key] : fallback;
+      defs.push({
+        id: key,
+        label: typeof meta.label === "string" ? meta.label : titleCase(key),
+        kind: inferKind(current, meta),
+        value: current,
+        min: typeof meta.min === "number" ? meta.min : undefined,
+        max: typeof meta.max === "number" ? meta.max : undefined,
+        step: typeof meta.step === "number" ? meta.step : undefined,
+        unit: typeof meta.unit === "string" ? meta.unit : undefined,
+        options: Array.isArray(meta.options) ? meta.options : undefined,
+        group: typeof meta.group === "string" ? meta.group : undefined,
+      });
+    }
+    return defs;
+  }
+
+  function sendTweaks() {
+    if (!hasTweaks) {
+      return;
+    }
+    post({ ns: NS, proto: PROTO, type: "tweaks", tweaks: buildTweakDefs() }, false);
+  }
+
+  function setCssVar(name, value, unit) {
+    var out;
+    if (typeof value === "boolean") {
+      out = value ? "1" : "0";
+    } else if (typeof value === "number" && unit) {
+      out = String(value) + unit;
+    } else {
+      out = String(value);
+    }
+    document.documentElement.style.setProperty(name, out);
+  }
+
+  function applyTweak(id, value) {
+    tweakValues[id] = value;
+    var meta = tweakMeta(id);
+    if (typeof window.applyLive === "function") {
+      try {
+        window.applyLive(id, value);
+      } catch (error) {
+        // Page handler threw — ignore.
+      }
+    } else if (typeof meta.cssVar === "string") {
+      setCssVar(meta.cssVar, value, meta.unit);
+    } else {
+      setCssVar("--tweak-" + id, value, meta.unit);
+    }
+    try {
+      localStorage.setItem("tweaks", JSON.stringify(tweakValues));
+    } catch (error) {
+      // Storage unavailable — ignore.
+    }
+  }
+
+  // Re-apply any locally-saved tweak values so a returning visitor keeps them. The host may then
+  // push its own saved-to-share values via tweak-set, which take precedence (they arrive later).
+  function applySavedTweaks() {
+    if (!hasTweaks) {
+      return;
+    }
+    for (var key in tweakValues) {
+      if (Object.prototype.hasOwnProperty.call(tweakValues, key)) {
+        applyTweak(key, tweakValues[key]);
+      }
+    }
+  }
+
+  // ---- channel -------------------------------------------------------------
+
   window.addEventListener("message", function (event) {
     var data = event.data;
     if (!data || data.ns !== NS || data.proto !== PROTO || typeof data.type !== "string") {
@@ -170,11 +339,21 @@
       case "ack":
         // Parent acknowledged; nothing required, handshake is complete.
         break;
+      case "hello-request":
+        // The bar (re)mounted and is probing — re-announce so it can match us.
+        sendHello();
+        sendTweaks();
+        break;
       case "inspect-enable":
         enableInspect();
         break;
       case "inspect-disable":
         disableInspect();
+        break;
+      case "tweak-set":
+        if (hasTweaks && typeof data.id === "string") {
+          applyTweak(data.id, data.value);
+        }
         break;
       default:
         break;
@@ -186,9 +365,15 @@
     post({ ns: NS, proto: PROTO, type: "bye" }, false);
   });
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", sendHello, { once: true });
-  } else {
+  function announce() {
+    applySavedTweaks();
     sendHello();
+    sendTweaks();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", announce, { once: true });
+  } else {
+    announce();
   }
 })();

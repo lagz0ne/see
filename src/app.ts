@@ -78,6 +78,9 @@ export function createApp(config: AppConfig): StaticShareApp {
       if (method === "GET" && url.pathname === "/sdk/see-inspect.js") {
         return await handleSdk();
       }
+      if (method === "GET" && url.pathname === "/llms.txt") {
+        return await handleLlmsTxt();
+      }
       if (method === "POST" && url.pathname === "/api/uploads") {
         return await handleUpload(request, server, repo, config, limiter);
       }
@@ -322,6 +325,7 @@ async function handleGetSettings(id: string, repo: UploadsRepository, config: Ap
     homepage: workspace.homepage ?? null,
     exposed: workspace.exposed ?? [],
     barDefault: workspace.barDefault ?? true,
+    tweaks: workspace.tweaks ?? {},
     htmlPages,
   });
 }
@@ -394,6 +398,25 @@ async function handlePatchSettings(request: Request, id: string, repo: UploadsRe
     newWorkspace.barDefault = bd;
   }
 
+  if ("tweaks" in body) {
+    const tw = body["tweaks"];
+    if (!tw || typeof tw !== "object" || Array.isArray(tw)) {
+      throw new AppError(400, "invalid_setting", "tweaks must be an object of primitive values");
+    }
+    const tweaksObj = tw as Record<string, unknown>;
+    for (const [, v] of Object.entries(tweaksObj)) {
+      if (typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") {
+        throw new AppError(400, "invalid_setting", "tweaks must be an object of primitive values");
+      }
+    }
+    const validTweaks = tweaksObj as Record<string, string | number | boolean>;
+    if (Object.keys(validTweaks).length === 0) {
+      delete newWorkspace.tweaks;
+    } else {
+      newWorkspace.tweaks = validTweaks;
+    }
+  }
+
   // Handle password change only when the "password" key is present in the body
   let newEditTokenHash = currentMetadata.editTokenHash;
   if ("password" in body) {
@@ -431,6 +454,7 @@ async function handlePatchSettings(request: Request, id: string, repo: UploadsRe
     homepage: updatedWorkspace.homepage ?? null,
     exposed: updatedWorkspace.exposed ?? [],
     barDefault: updatedWorkspace.barDefault ?? true,
+    tweaks: updatedWorkspace.tweaks ?? {},
     htmlPages,
   });
 }
@@ -717,6 +741,29 @@ async function handleSdk(): Promise<Response> {
 
   const type = "text/javascript; charset=utf-8";
   return new Response(Bun.file(sdkPath, { type }), {
+    status: 200,
+    headers: {
+      "Content-Type": type,
+      "Cache-Control": "public, max-age=300",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+}
+
+// Serves the agent-facing capability docs at /llms.txt.
+async function handleLlmsTxt(): Promise<Response> {
+  const docsPath = join(process.cwd(), "src", "docs", "llms.txt");
+  try {
+    const info = await stat(docsPath);
+    if (!info.isFile()) {
+      return textResponse("Not Found", 404);
+    }
+  } catch {
+    return textResponse("Not Found", 404);
+  }
+
+  const type = "text/plain; charset=utf-8";
+  return new Response(Bun.file(docsPath, { type }), {
     status: 200,
     headers: {
       "Content-Type": type,

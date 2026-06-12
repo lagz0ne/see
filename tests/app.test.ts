@@ -565,6 +565,109 @@ describe("static app share service", () => {
     expect(viewer.status).toBe(200);
     expect(await viewer.text()).toContain('data-bar-default="true"');
   });
+
+  test("GET /llms.txt returns 200 with text/plain containing SDK and protocol docs", async () => {
+    const { app } = await testApp();
+    const response = await app.fetch(new Request("http://share.test/llms.txt"));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/plain");
+    const body = await response.text();
+    expect(body).toContain("data-see-inspectable");
+    expect(body).toContain("TWEAK_DEFAULTS");
+    expect(body).toContain("see-inspect.js");
+  });
+
+  test("GET /api/uploads/:id/settings includes tweaks:{} by default", async () => {
+    const { app } = await testApp();
+    const payload = await (
+      await uploadFile(app, new File(["<h1>tweaks</h1>"], "index.html", { type: "text/html" }), { editToken: "tw" })
+    ).json();
+
+    const settings = await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/settings`));
+    expect(settings.status).toBe(200);
+    const body = await settings.json();
+    expect(body.tweaks).toEqual({});
+  });
+
+  test("PATCH tweaks persists and GET reflects saved tweaks", async () => {
+    const { app } = await testApp();
+    const payload = await (
+      await uploadFile(app, new File(["<h1>tweaks</h1>"], "index.html", { type: "text/html" }), { editToken: "tw" })
+    ).json();
+
+    const patched = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/settings`, {
+        method: "PATCH",
+        headers: { authorization: "Bearer tw", "content-type": "application/json" },
+        body: JSON.stringify({ tweaks: { primaryColor: "#fff", fontSize: 18, dark: true } }),
+      }),
+    );
+    expect(patched.status).toBe(200);
+    const patchBody = await patched.json();
+    expect(patchBody.tweaks).toEqual({ primaryColor: "#fff", fontSize: 18, dark: true });
+
+    const settings = await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/settings`));
+    expect(settings.status).toBe(200);
+    const settingsBody = await settings.json();
+    expect(settingsBody.tweaks).toEqual({ primaryColor: "#fff", fontSize: 18, dark: true });
+  });
+
+  test("PATCH tweaks rejects array or object with non-primitive values", async () => {
+    const { app } = await testApp();
+    const payload = await (
+      await uploadFile(app, new File(["<h1>tweaks</h1>"], "index.html", { type: "text/html" }), { editToken: "tw" })
+    ).json();
+
+    const arrayRejected = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/settings`, {
+        method: "PATCH",
+        headers: { authorization: "Bearer tw", "content-type": "application/json" },
+        body: JSON.stringify({ tweaks: [1, 2] }),
+      }),
+    );
+    expect(arrayRejected.status).toBe(400);
+    expect(await arrayRejected.json()).toMatchObject({ code: "invalid_setting" });
+
+    const nestedRejected = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/settings`, {
+        method: "PATCH",
+        headers: { authorization: "Bearer tw", "content-type": "application/json" },
+        body: JSON.stringify({ tweaks: { x: { nested: true } } }),
+      }),
+    );
+    expect(nestedRejected.status).toBe(400);
+    expect(await nestedRejected.json()).toMatchObject({ code: "invalid_setting" });
+  });
+
+  test("viewer page contains data-tweaks when tweaks are saved, omits it otherwise", async () => {
+    const { app } = await testApp();
+    const payload = await (
+      await uploadFile(app, new File(["<h1>tweaks</h1>"], "index.html", { type: "text/html" }), { editToken: "tw" })
+    ).json();
+
+    // Without tweaks: data-tweaks must be absent
+    const viewerBefore = await app.fetch(new Request(payload.viewerUrl));
+    expect(viewerBefore.status).toBe(200);
+    expect(await viewerBefore.text()).not.toContain("data-tweaks");
+
+    // Save tweaks
+    await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/settings`, {
+        method: "PATCH",
+        headers: { authorization: "Bearer tw", "content-type": "application/json" },
+        body: JSON.stringify({ tweaks: { primaryColor: "#fff", fontSize: 18, dark: true } }),
+      }),
+    );
+
+    // With tweaks: data-tweaks must be present with escaped JSON
+    const viewerAfter = await app.fetch(new Request(payload.viewerUrl));
+    expect(viewerAfter.status).toBe(200);
+    const html = await viewerAfter.text();
+    expect(html).toContain("data-tweaks=");
+    expect(html).toContain("primaryColor");
+    expect(html).toContain("#fff");
+  });
 });
 
 async function testApp(env: Record<string, string> = {}): Promise<{ app: StaticShareApp; dir: string; config: AppConfig }> {

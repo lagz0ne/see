@@ -4,11 +4,15 @@ import {
   PROTO,
   type Capability,
   type InspectTarget,
+  type TweakDef,
+  type TweakValue,
   grantCapabilities,
   isHelloMessage,
   isSeeMessage,
   isTargetsMessage,
+  isTweaksMessage,
   sanitizeTargets,
+  sanitizeTweaks,
 } from "./protocol";
 
 type InspectChannel = {
@@ -16,9 +20,15 @@ type InspectChannel = {
   granted: Set<Capability>;
   /** Latest inspectable element rects (iframe-content CSS px), only while inspect is enabled. */
   targets: InspectTarget[];
+  /** Tweak controls the page exposed (empty until a tweaks-capable page announces them). */
+  tweaks: TweakDef[];
   /** Tell the page to start/stop reporting targets. */
   enableInspect: () => void;
   disableInspect: () => void;
+  /** Push a new value for a tweak to the page; optimistically updates the local control. */
+  setTweak: (id: string, value: TweakValue) => void;
+  /** Probe the page to re-announce (covers the bar mounting / the iframe navigating). */
+  requestHello: () => void;
 };
 
 // Owns the parent side of the see-inspect protocol: validates inbound messages, tracks the
@@ -30,6 +40,7 @@ export function useInspectChannel(
 ): InspectChannel {
   const [granted, setGranted] = useState<Set<Capability>>(() => new Set());
   const [targets, setTargets] = useState<InspectTarget[]>([]);
+  const [tweaks, setTweaks] = useState<TweakDef[]>([]);
   // Mirror granted in a ref so post helpers don't need it as a dependency.
   const parentOriginRef = useRef(expectedContentOrigin);
   parentOriginRef.current = expectedContentOrigin;
@@ -57,6 +68,14 @@ export function useInspectChannel(
 
   const enableInspect = useCallback(() => postToFrame({ type: "inspect-enable" }), [postToFrame]);
   const disableInspect = useCallback(() => postToFrame({ type: "inspect-disable" }), [postToFrame]);
+  const requestHello = useCallback(() => postToFrame({ type: "hello-request" }), [postToFrame]);
+  const setTweak = useCallback(
+    (id: string, value: TweakValue) => {
+      postToFrame({ type: "tweak-set", id, value });
+      setTweaks((prev) => prev.map((tweak) => (tweak.id === id ? { ...tweak, value } : tweak)));
+    },
+    [postToFrame],
+  );
 
   useEffect(() => {
     function handleMessage(event: MessageEvent) {
@@ -80,6 +99,7 @@ export function useInspectChannel(
         const grantedList = grantCapabilities(data.capabilities);
         setGranted(new Set(grantedList));
         setTargets([]);
+        // Keep any tweaks already received; a tweaks-capable page sends them right after hello.
         ackCapabilities(grantedList);
         return;
       }
@@ -87,15 +107,26 @@ export function useInspectChannel(
         setTargets(sanitizeTargets(data.targets));
         return;
       }
+      if (isTweaksMessage(data)) {
+        setTweaks(sanitizeTweaks(data.tweaks));
+        return;
+      }
       if (data.type === "bye") {
         setGranted(new Set());
         setTargets([]);
+        setTweaks([]);
       }
     }
 
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
   }, [iframeRef, ackCapabilities]);
+
+  // Probe once on mount so the bar discovers a page that loaded before it (the page also
+  // announces on its own load, covering the opposite order).
+  useEffect(() => {
+    requestHello();
+  }, [requestHello]);
 
   // Tell the page to stop reporting when the viewer unmounts.
   useEffect(() => {
@@ -104,5 +135,5 @@ export function useInspectChannel(
     };
   }, [disableInspect]);
 
-  return { granted, targets, enableInspect, disableInspect };
+  return { granted, targets, tweaks, enableInspect, disableInspect, setTweak, requestHello };
 }
