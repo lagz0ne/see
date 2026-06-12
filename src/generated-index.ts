@@ -65,13 +65,13 @@ export function renderGeneratedIndex(resources: ResourceInfo[], title?: string):
 <style>
   :root {
     color-scheme: light dark;
-    --bg: #ffffff; --fg: #171717; --muted: #737373; --line: #e5e5e5;
-    --surface: #fafafa; --fg-invert: #fafafa;
+    --bg: #fdfdfc; --fg: #1a1a18; --muted: #7a7a76; --line: #e6e6e3;
+    --surface: #f7f7f5; --accent: #d98a1f; --accent-fg: #241a08;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #0a0a0a; --fg: #fafafa; --muted: #a1a1a1; --line: #262626;
-      --surface: #171717; --fg-invert: #171717;
+      --bg: #1a1a18; --fg: #f5f5f2; --muted: #a3a39d; --line: #33332f;
+      --surface: #242422; --accent: #e6a23c; --accent-fg: #241a08;
     }
   }
   * { box-sizing: border-box; }
@@ -81,32 +81,44 @@ export function renderGeneratedIndex(resources: ResourceInfo[], title?: string):
   }
   .wrap { max-width: 44rem; margin: 0 auto; padding: clamp(1.5rem, 5vw, 4rem) 1.25rem; }
   .card {
-    background: var(--bg); border: 1px solid var(--line); border-radius: 0.75rem;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.04); padding: clamp(1.25rem, 4vw, 2.25rem);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 0.5rem;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.03); padding: clamp(1.25rem, 4vw, 2.25rem);
   }
-  .badge {
-    display: inline-block; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.08em;
-    text-transform: uppercase; color: var(--muted);
-    border: 1px solid var(--line); padding: 0.25rem 0.6rem; border-radius: 999px;
+  .brand {
+    display: flex; align-items: center; gap: 0.6rem;
+  }
+  .brand-tile {
+    width: 1.4rem; height: 1.4rem; border-radius: 0.4rem;
+    background: var(--accent); flex-shrink: 0;
+  }
+  .brand-eyebrow {
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+    text-transform: uppercase; letter-spacing: 0.12em; font-size: 0.7rem;
+    color: var(--muted); font-weight: 500;
   }
   h1 {
     margin: 0.85rem 0 0; font-size: clamp(1.5rem, 5vw, 2rem); font-weight: 700;
     letter-spacing: -0.02em; color: var(--fg);
   }
   .note { margin: 0.5rem 0 1.5rem; font-size: 0.9rem; color: var(--muted); }
-  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85em;
-    background: var(--surface); border: 1px solid var(--line); padding: 0.05em 0.35em; border-radius: 0.35rem; }
-  h2 { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
-    color: var(--muted); margin: 1.75rem 0 0.75rem; }
+  code {
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace; font-size: 0.85em;
+    background: var(--surface); border: 1px solid var(--line); padding: 0.05em 0.35em; border-radius: 0.35rem;
+  }
+  h2 {
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+    font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.12em;
+    color: var(--muted); margin: 1.75rem 0 0.75rem;
+  }
   .group:first-of-type h2 { margin-top: 0.5rem; }
   .entries { display: grid; gap: 0.5rem; }
   .entry {
     display: flex; align-items: center; justify-content: space-between; gap: 1rem;
-    padding: 0.8rem 1.1rem; border-radius: 0.6rem; text-decoration: none;
-    background: var(--fg); color: var(--fg-invert); font-weight: 600;
-    transition: opacity 0.12s ease;
+    padding: 0.8rem 1.1rem; border-radius: 0.5rem; text-decoration: none;
+    background: var(--accent); color: var(--accent-fg); font-weight: 600;
+    transition: opacity 0.18s cubic-bezier(0.16, 1, 0.3, 1);
   }
-  .entry:hover { opacity: 0.9; }
+  .entry:hover { opacity: 0.88; }
   .entry-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .entry-open { flex-shrink: 0; opacity: 0.8; font-size: 0.9rem; }
   .files { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.35rem; }
@@ -118,13 +130,19 @@ export function renderGeneratedIndex(resources: ResourceInfo[], title?: string):
   .files a { color: var(--fg); text-decoration: none; font-weight: 500;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .files a:hover { text-decoration: underline; }
-  .size { flex-shrink: 0; font-variant-numeric: tabular-nums; font-size: 0.8rem; color: var(--muted); }
+  .size {
+    flex-shrink: 0; font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+    font-variant-numeric: tabular-nums; font-size: 0.8rem; color: var(--muted);
+  }
 </style>
 </head>
 <body>
   <div class="wrap">
     <main class="card">
-      <span class="badge">Static App Share</span>
+      <div class="brand">
+        <div class="brand-tile"></div>
+        <span class="brand-eyebrow">Static App Share</span>
+      </div>
       <h1>${escapeHtml(heading)}</h1>
       ${note}
       ${entriesSection}

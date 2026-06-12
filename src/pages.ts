@@ -4,7 +4,7 @@ import { uploadRevision } from "./upload-metadata";
 import { contentFrameSrc, viewerUrl } from "./urls";
 import { escapeHtml } from "./lib/html";
 
-const ASSET_VERSION = "20260611-clean-neutral";
+const ASSET_VERSION = "20260612-blueprint";
 
 export function uploadPage(config: AppConfig): string {
   return htmlDocument(
@@ -74,13 +74,17 @@ export function expiredPage(upload: UploadRecord): string {
     "Link expired",
     `
       <main class="message-page">
-        <section class="mx-auto grid min-h-screen w-full max-w-xl place-items-center px-4 py-8">
-          <div class="w-full rounded-xl border bg-card p-6 shadow-xl shadow-foreground/5">
-            <p class="text-xs font-medium uppercase text-muted-foreground">Static App Share</p>
-            <h1 class="mt-2 text-2xl font-semibold tracking-normal">Link expired</h1>
-            <p class="mt-3 text-sm text-muted-foreground">${escapeHtml(title)} expired at ${escapeHtml(upload.expiresAt)}.</p>
+        <div class="grid min-h-screen place-items-center px-4">
+          <div class="w-full max-w-md">
+            <div class="flex items-center gap-3 mb-4">
+              <span class="inline-grid size-7 place-items-center rounded-[0.5rem] bg-primary text-primary-foreground" aria-hidden="true"></span>
+              <span class="font-mono text-xs uppercase tracking-[0.18em] text-muted-foreground">Static App Share</span>
+            </div>
+            <div class="border-t mb-6"></div>
+            <h1 class="text-2xl font-semibold tracking-tight text-foreground mb-3">Link expired</h1>
+            <p class="text-sm text-muted-foreground">${escapeHtml(title)} — expired <span class="font-mono tabular-nums">${escapeHtml(upload.expiresAt)}</span>.</p>
           </div>
-        </section>
+        </div>
       </main>
     `,
   );
@@ -91,13 +95,17 @@ export function notFoundPage(): string {
     "Not found",
     `
       <main class="message-page">
-        <section class="mx-auto grid min-h-screen w-full max-w-xl place-items-center px-4 py-8">
-          <div class="w-full rounded-xl border bg-card p-6 shadow-xl shadow-foreground/5">
-            <p class="text-xs font-medium uppercase text-muted-foreground">Static App Share</p>
-            <h1 class="mt-2 text-2xl font-semibold tracking-normal">Not found</h1>
-            <p class="mt-3 text-sm text-muted-foreground">The requested share link does not exist.</p>
+        <div class="grid min-h-screen place-items-center px-4">
+          <div class="w-full max-w-md">
+            <div class="flex items-center gap-3 mb-4">
+              <span class="inline-grid size-7 place-items-center rounded-[0.5rem] bg-primary text-primary-foreground" aria-hidden="true"></span>
+              <span class="font-mono text-xs uppercase tracking-[0.18em] text-muted-foreground">Static App Share</span>
+            </div>
+            <div class="border-t mb-6"></div>
+            <h1 class="text-2xl font-semibold tracking-tight text-foreground mb-3">Not found</h1>
+            <p class="text-sm text-muted-foreground">The requested share link does not exist.</p>
           </div>
-        </section>
+        </div>
       </main>
     `,
   );
@@ -108,13 +116,17 @@ export function errorPage(title: string, message: string): string {
     title,
     `
       <main class="message-page">
-        <section class="mx-auto grid min-h-screen w-full max-w-xl place-items-center px-4 py-8">
-          <div class="w-full rounded-xl border bg-card p-6 shadow-xl shadow-foreground/5">
-            <p class="text-xs font-medium uppercase text-muted-foreground">Static App Share</p>
-            <h1 class="mt-2 text-2xl font-semibold tracking-normal">${escapeHtml(title)}</h1>
-            <p class="mt-3 text-sm text-muted-foreground">${escapeHtml(message)}</p>
+        <div class="grid min-h-screen place-items-center px-4">
+          <div class="w-full max-w-md">
+            <div class="flex items-center gap-3 mb-4">
+              <span class="inline-grid size-7 place-items-center rounded-[0.5rem] bg-primary text-primary-foreground" aria-hidden="true"></span>
+              <span class="font-mono text-xs uppercase tracking-[0.18em] text-muted-foreground">Static App Share</span>
+            </div>
+            <div class="border-t mb-6"></div>
+            <h1 class="text-2xl font-semibold tracking-tight text-foreground mb-3">${escapeHtml(title)}</h1>
+            <p class="text-sm text-muted-foreground">${escapeHtml(message)}</p>
           </div>
-        </section>
+        </div>
       </main>
     `,
   );

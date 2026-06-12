@@ -157,7 +157,7 @@ function UploadApp({ root }: StaticShareAppProps) {
       return null;
     }
     const total = files.reduce((sum, item) => sum + item.size, 0);
-    return files.length === 1 ? `${files[0].name} - ${formatBytes(total)}` : `${files.length} files - ${formatBytes(total)}`;
+    return files.length === 1 ? `${files[0].name} · ${formatBytes(total)}` : `${files.length} files · ${formatBytes(total)}`;
   }, [files]);
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -240,29 +240,37 @@ function UploadApp({ root }: StaticShareAppProps) {
         <div className="grid w-full gap-6 lg:grid-cols-[minmax(0,0.8fr)_minmax(460px,0.9fr)] lg:items-center">
           <section className="flex flex-col gap-6">
             <div className="flex items-center gap-3">
-              <div className="grid size-11 place-items-center rounded-xl bg-primary text-primary-foreground shadow-sm">
+              <div className="grid size-11 place-items-center rounded-lg bg-primary text-primary-foreground">
                 <FileArchiveIcon data-icon="inline-start" />
               </div>
-              <p className="text-xs font-semibold tracking-[0.18em] text-muted-foreground uppercase">
-                Static App Share
+              <p className="font-mono text-xs uppercase tracking-[0.18em] text-muted-foreground">
+                STATIC APP SHARE
               </p>
             </div>
             <div className="flex flex-col gap-3">
               <h1 className="text-4xl font-bold tracking-tight text-balance sm:text-5xl">
-                Ship a static app{" "}
-                <span className="text-muted-foreground">in seconds.</span>
+                Ship a static app in seconds.
               </h1>
               <p className="max-w-md text-base text-muted-foreground text-pretty">
                 Drop an HTML file, a ZIP, or a folder of static resources and get a
                 shareable live preview link instantly.
               </p>
             </div>
-            <div className="flex flex-wrap gap-2">
-              <Badge variant={tokenRequired ? "default" : "secondary"} className="h-6 px-2.5">
-                {tokenRequired ? "🔒 Protected upload" : "Public upload"}
-              </Badge>
-              <Badge variant="outline" className="h-6 px-2.5">{formatBytes(maxUploadBytes)} max</Badge>
-              <Badge variant="outline" className="h-6 px-2.5">{retentionDays} day retention</Badge>
+            <div className="rounded-lg border divide-y">
+              <div className="flex items-center justify-between px-3 py-2">
+                <span className="font-mono text-xs uppercase tracking-[0.12em] text-muted-foreground">MAX UPLOAD</span>
+                <span className="font-mono text-sm tabular-nums text-foreground">{formatBytes(maxUploadBytes)}</span>
+              </div>
+              <div className="flex items-center justify-between px-3 py-2">
+                <span className="font-mono text-xs uppercase tracking-[0.12em] text-muted-foreground">RETENTION</span>
+                <span className="font-mono text-sm tabular-nums text-foreground">{retentionDays} DAYS</span>
+              </div>
+              <div className="flex items-center justify-between px-3 py-2">
+                <span className="font-mono text-xs uppercase tracking-[0.12em] text-muted-foreground">ACCESS</span>
+                <span className={cn("font-mono text-sm tabular-nums", tokenRequired ? "text-primary" : "text-foreground")}>
+                  {tokenRequired ? "TOKEN REQUIRED" : "PUBLIC"}
+                </span>
+              </div>
             </div>
           </section>
 
@@ -271,8 +279,8 @@ function UploadApp({ root }: StaticShareAppProps) {
               <CardTitle className="text-lg">New share</CardTitle>
               <CardDescription>HTML, ZIP, or static resources</CardDescription>
               <CardAction>
-                <Badge variant={status.tone === "error" ? "destructive" : "outline"}>
-                  {isUploading ? "Uploading" : result ? "Ready" : "Idle"}
+                <Badge variant={status.tone === "error" ? "destructive" : "outline"} className="font-mono text-xs">
+                  {isUploading ? "UPLOADING" : result ? "READY" : "IDLE"}
                 </Badge>
               </CardAction>
             </CardHeader>
@@ -333,7 +341,7 @@ function UploadApp({ root }: StaticShareAppProps) {
                       </div>
                       {files.length > 0 ? (
                         <div className="space-y-0.5">
-                          <p className="text-sm font-medium">{selectedFileMeta}</p>
+                          <p className="font-mono text-sm font-medium tabular-nums">{selectedFileMeta}</p>
                           <p className="text-xs text-muted-foreground">Click or drop to replace</p>
                         </div>
                       ) : (
@@ -393,7 +401,7 @@ function UploadApp({ root }: StaticShareAppProps) {
                     <Field>
                       <div className="flex items-center justify-between gap-3">
                         <FieldLabel>Upload progress</FieldLabel>
-                        <span className="text-sm text-muted-foreground">{progress}%</span>
+                        <span className="font-mono text-sm tabular-nums text-muted-foreground">{progress}%</span>
                       </div>
                       <Progress value={progress} />
                     </Field>
@@ -437,7 +445,7 @@ function UploadApp({ root }: StaticShareAppProps) {
                 <Field>
                   <FieldLabel htmlFor="viewerLink">Viewer link</FieldLabel>
                   <div className="flex gap-2">
-                    <Input id="viewerLink" value={result.viewerUrl} readOnly />
+                    <Input id="viewerLink" value={result.viewerUrl} readOnly className="font-mono" />
                     <Button type="button" variant="outline" size="icon" onClick={copyViewerLink}>
                       <CopyIcon data-icon="inline-start" />
                       <span className="sr-only">Copy</span>
@@ -447,7 +455,7 @@ function UploadApp({ root }: StaticShareAppProps) {
                 <Field>
                   <FieldLabel htmlFor="resultEditToken">Edit token</FieldLabel>
                   <div className="flex gap-2">
-                    <Input id="resultEditToken" value={result.editToken} readOnly />
+                    <Input id="resultEditToken" value={result.editToken} readOnly className="font-mono" />
                     <Button
                       type="button"
                       variant="outline"
@@ -640,7 +648,7 @@ function ViewerApp({ root }: StaticShareAppProps) {
     setZoomMode("custom");
   }
 
-  const dimensionLabel = `${frameMetrics.frameWidth} x ${frameMetrics.frameHeight}`;
+  const dimensionLabel = `${frameMetrics.frameWidth} × ${frameMetrics.frameHeight}`;
 
   return (
     <main className="relative flex h-screen min-h-screen flex-col overflow-hidden bg-background">
@@ -656,14 +664,14 @@ function ViewerApp({ root }: StaticShareAppProps) {
             </div>
           </div>
 
-          <Badge variant="outline" className="hidden shrink-0 sm:inline-flex">
-            {dimensionLabel} at {Math.round(frameMetrics.scale * 100)}%
+          <Badge variant="outline" className="hidden shrink-0 font-mono tabular-nums sm:inline-flex">
+            {dimensionLabel} · <span className="tabular-nums">{Math.round(frameMetrics.scale * 100)}%</span>
           </Badge>
-          <Badge variant="outline" className="hidden shrink-0 md:inline-flex">
-            Expires {formatDateTime(expiresAt)}
+          <Badge variant="outline" className="hidden shrink-0 font-mono tabular-nums md:inline-flex">
+            EXPIRES {formatDateTime(expiresAt)}
           </Badge>
-          <Badge variant="outline" className="hidden shrink-0 lg:inline-flex">
-            Rev {resourceRevision}
+          <Badge variant="outline" className="hidden shrink-0 font-mono tabular-nums lg:inline-flex">
+            REV {resourceRevision}
           </Badge>
 
           <div className="flex shrink-0 items-center gap-1">
@@ -676,8 +684,8 @@ function ViewerApp({ root }: StaticShareAppProps) {
               <PopoverContent align="end" className="w-[min(calc(100vw-1rem),30rem)] gap-3 p-3">
                 <PopoverHeader>
                   <PopoverTitle>Viewer controls</PopoverTitle>
-                  <PopoverDescription>
-                    {dimensionLabel} at {Math.round(frameMetrics.scale * 100)}%
+                  <PopoverDescription className="font-mono tabular-nums">
+                    {dimensionLabel} · {Math.round(frameMetrics.scale * 100)}%
                   </PopoverDescription>
                 </PopoverHeader>
                 <FieldGroup className="gap-3">
@@ -772,7 +780,7 @@ function ViewerApp({ root }: StaticShareAppProps) {
               <PopoverContent align="end" className="w-[min(calc(100vw-1rem),32rem)] gap-3 p-3">
                 <PopoverHeader>
                   <PopoverTitle>Resources</PopoverTitle>
-                  <PopoverDescription>Revision {resourceRevision}</PopoverDescription>
+                  <PopoverDescription className="font-mono tabular-nums">REVISION {resourceRevision}</PopoverDescription>
                 </PopoverHeader>
                 <ResourceManager
                   uploadId={uploadId}
@@ -857,7 +865,7 @@ function ViewerApp({ root }: StaticShareAppProps) {
               style={{ width: frameMetrics.frameWidth, height: frameMetrics.frameHeight }}
             >
               {showDims ? (
-                <Badge className="absolute right-2 top-2 z-10" variant="secondary">
+                <Badge className="absolute right-2 top-2 z-10 font-mono tabular-nums" variant="secondary">
                   {dimensionLabel}
                 </Badge>
               ) : null}
@@ -1005,9 +1013,9 @@ function ResourceManager({
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <KeyRoundIcon data-icon="inline-start" />
-          <span className="text-sm font-medium">Revision {revision}</span>
+          <span className="font-mono text-sm font-medium tabular-nums">REVISION {revision}</span>
         </div>
-        <Badge variant="outline">{resources.length} files</Badge>
+        <Badge variant="outline" className="font-mono tabular-nums">{resources.length} files</Badge>
       </div>
 
       <form onSubmit={handleResourceUpload}>
@@ -1081,8 +1089,8 @@ function ResourceManager({
             <div key={resource.path} className="flex min-h-10 items-center gap-2 border-b px-2 py-1.5 last:border-b-0">
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium">{resource.path}</p>
-                <p className="text-xs text-muted-foreground">
-                  {formatBytes(resource.bytes)} - {resource.contentType}
+                <p className="font-mono text-xs tabular-nums text-muted-foreground">
+                  {formatBytes(resource.bytes)} · {resource.contentType}
                 </p>
               </div>
               <TooltipButton
@@ -1134,7 +1142,7 @@ function CompactNumberField({
         max={max}
         step={step}
         value={value}
-        className="h-7 w-full px-2"
+        className="h-7 w-full px-2 font-mono tabular-nums"
         onChange={(event) => onChange(event.currentTarget.value)}
       />
     </Field>

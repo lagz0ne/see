@@ -1,0 +1,13 @@
+[
+  {
+    "date": "2026-06-12",
+    "scope": "app",
+    "macrostructure": "Workbench + Plain Block",
+    "theme": "Blueprint (custom)",
+    "theme_axes": "light / system-sans + mono / warm-amber",
+    "vibe": "drafting console / spec sheet",
+    "enrichment": "none",
+    "design-system": "design.md",
+    "brief": "Static App Share — redesign all surfaces, warm-amber Blueprint identity"
+  }
+]
