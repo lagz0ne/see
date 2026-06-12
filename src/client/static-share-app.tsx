@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangleIcon,
+  CameraIcon,
   CheckCircle2Icon,
   CopyIcon,
+  CrosshairIcon,
   ExternalLinkIcon,
   FileArchiveIcon,
   EyeIcon,
@@ -64,6 +66,10 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { CapturePreview } from "./inspector/CapturePreview";
+import { InspectOverlay, type Selection } from "./inspector/InspectOverlay";
+import { CaptureError, type CaptureResult, DisplayCapture, contentRectToParentRect, supportsDisplayCapture } from "./inspector/captureSelection";
+import { useInspectChannel } from "./inspector/useInspectChannel";
 
 type StaticShareAppProps = {
   root: HTMLElement;
@@ -528,6 +534,69 @@ function ViewerApp({ root }: StaticShareAppProps) {
   const [frameSrc, setFrameSrc] = useState(initialContentUrl);
   const [copied, setCopied] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(readViewerChromeVisible);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const contentOrigin = root.dataset.contentOrigin || window.location.origin;
+  const { granted, targets, enableInspect, disableInspect } = useInspectChannel(iframeRef, contentOrigin);
+  const inspectAvailable = granted.has("inspect");
+  const captureSupported = supportsDisplayCapture();
+  const [inspectMode, setInspectMode] = useState(false);
+  const [selection, setSelection] = useState<Selection | null>(null);
+  const [captureResult, setCaptureResult] = useState<CaptureResult | null>(null);
+  const [captureNote, setCaptureNote] = useState("");
+  const captureRef = useRef<DisplayCapture | null>(null);
+
+  useEffect(() => {
+    const capture = new DisplayCapture(() => setCaptureNote("Screen sharing stopped."));
+    captureRef.current = capture;
+    return () => capture.stop();
+  }, []);
+
+  function exitInspect() {
+    setInspectMode(false);
+    setSelection(null);
+    captureRef.current?.stop();
+    disableInspect();
+  }
+
+  function toggleInspect() {
+    if (inspectMode) {
+      exitInspect();
+      return;
+    }
+    setCaptureNote("");
+    setInspectMode(true);
+    enableInspect();
+  }
+
+  async function captureSelectionNow() {
+    const frame = iframeRef.current;
+    if (!selection || !frame || !captureRef.current) {
+      return;
+    }
+    // Synchronous work only before the first await so the user gesture is preserved for
+    // getDisplayMedia (it requires transient activation).
+    const parentRect = contentRectToParentRect(selection.rect, frame.getBoundingClientRect(), frameMetrics.frameWidth);
+    setCaptureNote("");
+    try {
+      const result = await captureRef.current.capture(parentRect, {
+        seeId: selection.seeId,
+        seeLabel: selection.seeLabel,
+        contentRect: selection.rect,
+      });
+      setCaptureResult(result);
+    } catch (error) {
+      setCaptureNote(error instanceof CaptureError ? error.message : "Capture failed.");
+    }
+  }
+
+  // Leave inspect mode if the capability goes away (page navigated within the iframe, or the
+  // SDK was removed and re-announced without inspect).
+  useEffect(() => {
+    if (!inspectAvailable && inspectMode) {
+      exitInspect();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inspectAvailable]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
@@ -540,13 +609,21 @@ function ViewerApp({ root }: StaticShareAppProps) {
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !controlsVisible) {
+      if (event.key !== "Escape") {
+        return;
+      }
+      if (inspectMode) {
+        exitInspect();
+        return;
+      }
+      if (!controlsVisible) {
         setControlsVisible(true);
       }
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [controlsVisible]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controlsVisible, inspectMode]);
 
   useEffect(() => {
     const element = stageRef.current;
@@ -675,6 +752,28 @@ function ViewerApp({ root }: StaticShareAppProps) {
           </Badge>
 
           <div className="flex shrink-0 items-center gap-1">
+            {inspectAvailable ? (
+              <TooltipButton
+                label={inspectMode ? "Exit inspect" : "Inspect page"}
+                variant={inspectMode ? "default" : "outline"}
+                size="icon-sm"
+                aria-pressed={inspectMode}
+                onClick={toggleInspect}
+              >
+                <CrosshairIcon data-icon="inline-start" />
+              </TooltipButton>
+            ) : null}
+            {inspectMode && captureSupported ? (
+              <TooltipButton
+                label={selection ? "Capture selection" : "Select a region first"}
+                variant="outline"
+                size="icon-sm"
+                disabled={!selection}
+                onClick={captureSelectionNow}
+              >
+                <CameraIcon data-icon="inline-start" />
+              </TooltipButton>
+            ) : null}
             <Popover>
               <PopoverTrigger asChild>
                 <Button variant="outline" size="icon-sm" aria-label="Viewer controls">
@@ -873,16 +972,34 @@ function ViewerApp({ root }: StaticShareAppProps) {
                 <div className="pointer-events-none absolute inset-0 z-10 border-[24px] border-primary/15 outline outline-1 -outline-offset-[24px] outline-primary/70" />
               ) : null}
               <iframe
+                ref={iframeRef}
                 title="Uploaded app"
                 src={frameSrc}
                 sandbox="allow-scripts allow-forms allow-pointer-lock"
                 referrerPolicy="no-referrer"
                 className="block size-full border-0 bg-background"
               />
+              <InspectOverlay
+                active={inspectMode}
+                targets={targets}
+                frameWidth={frameMetrics.frameWidth}
+                frameHeight={frameMetrics.frameHeight}
+                selection={selection}
+                onSelect={setSelection}
+              />
             </div>
           </div>
         </div>
       </section>
+
+      {captureResult ? (
+        <CapturePreview result={captureResult} onRetake={() => setCaptureResult(null)} onClose={() => setCaptureResult(null)} />
+      ) : null}
+      {captureNote && !captureResult ? (
+        <div className="absolute right-3 top-3 z-50 max-w-[min(calc(100vw-1.5rem),20rem)] rounded-lg border bg-card/95 px-3 py-2 text-sm shadow-lg backdrop-blur">
+          {captureNote}
+        </div>
+      ) : null}
     </main>
   );
 }

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>see-inspect demo</title>
+    <!--
+      Opt into the inspector capability protocol.
+
+      Root-relative works when content is served from the same host as the viewer
+      (the default /content/:id/ setup). If you serve content from a SEPARATE
+      CONTENT_BASE_URL origin, use the absolute public URL instead, e.g.:
+        <script src="https://your-see-host/sdk/see-inspect.js" data-see-capabilities="inspect"></script>
+    -->
+    <script src="/sdk/see-inspect.js" data-see-capabilities="inspect"></script>
+    <style>
+      body {
+        margin: 0;
+        font-family: system-ui, sans-serif;
+        background: #fffaf3;
+        color: #2b2b2b;
+        padding: 2rem;
+      }
+      h1 { margin-top: 0; }
+      .card {
+        border: 1px solid #e5d8c5;
+        border-radius: 12px;
+        padding: 1.5rem;
+        margin: 1rem 0;
+        background: #fff;
+      }
+      .hero {
+        background: linear-gradient(135deg, #f6b73c, #f08a24);
+        color: #fff;
+        border: none;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>see-inspect demo</h1>
+    <p>Open this share in the viewer, then click the crosshair “Inspect page” button in the bar.</p>
+
+    <section class="card hero" data-see-inspectable data-see-id="hero" data-see-label="Hero banner">
+      <h2>Hero banner</h2>
+      <p>Marked with <code>data-see-inspectable</code>. Click it in inspect mode, then Capture.</p>
+    </section>
+
+    <section class="card" data-see-inspectable data-see-id="pricing" data-see-label="Pricing card">
+      <h2>Pricing</h2>
+      <p>$19/mo — another inspectable region.</p>
+    </section>
+
+    <section class="card">
+      <h2>Not inspectable</h2>
+      <p>This block has no marker, so the inspector never targets it.</p>
+    </section>
+  </body>
+</html>

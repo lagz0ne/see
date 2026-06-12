@@ -75,6 +75,9 @@ export function createApp(config: AppConfig): StaticShareApp {
       if (method === "GET" && url.pathname.startsWith("/assets/")) {
         return await handleAsset(url.pathname);
       }
+      if (method === "GET" && url.pathname === "/sdk/see-inspect.js") {
+        return await handleSdk();
+      }
       if (method === "POST" && url.pathname === "/api/uploads") {
         return await handleUpload(request, server, repo, config, limiter);
       }
@@ -533,6 +536,30 @@ async function handleAsset(pathname: string): Promise<Response> {
   });
 }
 
+// Serves the opt-in inspector SDK that uploaded pages include with a <script> tag. Served from
+// source (not dist/) since it is hand-authored plain JS, and only on the public origin.
+async function handleSdk(): Promise<Response> {
+  const sdkPath = join(process.cwd(), "src", "sdk", "see-inspect.js");
+  try {
+    const info = await stat(sdkPath);
+    if (!info.isFile()) {
+      return textResponse("Not Found", 404);
+    }
+  } catch {
+    return textResponse("Not Found", 404);
+  }
+
+  const type = "text/javascript; charset=utf-8";
+  return new Response(Bun.file(sdkPath, { type }), {
+    status: 200,
+    headers: {
+      "Content-Type": type,
+      "Cache-Control": "public, max-age=300",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+}
+
 function requireUploadToken(request: Request, config: AppConfig): void {
   if (!config.uploadToken) {
     return;
@@ -739,7 +766,7 @@ function viewerHeaders(config: AppConfig): Record<string, string> {
     ].join("; "),
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
-    "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
+    "Permissions-Policy": "geolocation=(), microphone=(), camera=(), display-capture=(self)",
     "Cache-Control": "no-store",
   };
 }

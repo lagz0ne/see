@@ -384,6 +384,38 @@ describe("static app share service", () => {
     expect(content.status).toBe(200);
     expect(await content.text()).toContain("origin");
   });
+
+  test("serves the opt-in inspector SDK on the public origin", async () => {
+    const { app } = await testApp();
+    const response = await app.fetch(new Request("http://share.test/sdk/see-inspect.js"));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/javascript");
+    const body = await response.text();
+    expect(body).toContain("see-inspect");
+    expect(body).toContain("data-see-inspectable");
+  });
+
+  test("viewer exposes the content origin and allows display-capture", async () => {
+    const { app } = await testApp();
+    const payload = await (
+      await uploadFile(app, new File(["<h1>x</h1>"], "index.html", { type: "text/html" }))
+    ).json();
+
+    const viewer = await app.fetch(new Request(payload.viewerUrl));
+    expect(viewer.headers.get("permissions-policy")).toContain("display-capture=(self)");
+    expect(await viewer.text()).toContain('data-content-origin="http://share.test"');
+  });
+
+  test("viewer content origin reflects a configured content origin", async () => {
+    const { app } = await testApp({ CONTENT_BASE_URL: "http://content.test" });
+    const payload = await (
+      await uploadFile(app, new File(["<h1>x</h1>"], "index.html", { type: "text/html" }))
+    ).json();
+
+    const viewer = await app.fetch(new Request(payload.viewerUrl));
+    expect(await viewer.text()).toContain('data-content-origin="http://content.test"');
+  });
 });
 
 async function testApp(env: Record<string, string> = {}): Promise<{ app: StaticShareApp; dir: string; config: AppConfig }> {
