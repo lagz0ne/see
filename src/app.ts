@@ -9,6 +9,7 @@ import {
   deleteArtifact,
   deleteResource,
   listResources,
+  normalizeResourcePath,
   randomEditToken,
   renameArtifact,
   sha256Text,
@@ -34,7 +35,7 @@ import {
   type WorkspaceSettings,
 } from "./upload-metadata";
 import { contentFrameSrc, contentOrigin, contentRootUrl, isContentHost, viewerUrl } from "./urls";
-import { AppError, type ResourceInfo, type UploadRecord } from "./types";
+import { AppError, type ResourceInfo, type UploadKind, type UploadRecord } from "./types";
 import { eventBus } from "./events";
 
 type AppServer = Pick<Server<unknown>, "requestIP">;
@@ -877,10 +878,23 @@ async function handleResourceRequest(
     if (requestedPath && files.length > 1) {
       throw new AppError(400, "invalid_resource_path", "The path field can only be used with one file");
     }
+    const inputs = files.map((file, index) => {
+      const path = index === 0 ? requestedPath : null;
+      return { file, path, targetPath: normalizeResourcePath(path ?? file.name, config.maxPathDepth) };
+    });
+    // Adding a see.json turns the share into a bundle: validate the manifest loudly before
+    // writing so a share never becomes a broken bundle (mirrors the replace path above).
+    if (inputs.some((input) => input.targetPath === MANIFEST_FILENAME)) {
+      const manifestInput = inputs.find((input) => input.targetPath === MANIFEST_FILENAME)!;
+      const manifest = parseManifest(await manifestInput.file.text());
+      const existingPages = htmlPagesOf(await listResources(config, upload.storagePath));
+      const addedHtml = inputs.map((i) => i.targetPath).filter((p) => /\.(html|htm)$/i.test(p));
+      deriveBundleState(manifest, [...new Set([...existingPages, ...addedHtml])], { strict: true });
+    }
     const summary = await addOrReplaceResources(
       config,
       upload.storagePath,
-      files.map((file, index) => ({ file, path: index === 0 ? requestedPath : null })),
+      inputs.map(({ file, path }) => ({ file, path })),
     );
     const payload = await persistResourceMutation(repo, config, upload, summary);
     logEvent("info", "resource_upload_success", {
@@ -1407,13 +1421,21 @@ async function persistResourceMutation(
     bundle: metadata.bundle,
   });
   const metadataJson = serializeUploadMetadata({ ...metadata, revision, workspace, bundle });
+  // kind follows the presence of a root see.json: a newly added manifest upgrades a plain
+  // share to a bundle; removing it downgrades back to a generic resource share. (Any see.json
+  // present here has already been strict-validated by the entry path that wrote it.)
+  const hasManifest = summary.resources.some((r) => r.path === MANIFEST_FILENAME);
+  const kind: UploadKind = hasManifest ? "bundle" : upload.kind === "bundle" ? "resources" : upload.kind;
+  const kindChanged = kind !== upload.kind;
   repo.updateMutableState(upload.id, {
     sha256: summary.sha256,
     extractedBytes: summary.extractedBytes,
     fileCount: summary.fileCount,
     metadataJson,
+    ...(kindChanged ? { kind } : {}),
   });
   upload.metadataJson = metadataJson;
+  if (kindChanged) upload.kind = kind;
   eventBus.emit(upload.id, { type: "update", revision });
   return {
     id: upload.id,

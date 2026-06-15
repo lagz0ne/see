@@ -408,6 +408,85 @@ describe("bundles", () => {
     expect(pricingAfter).toContain("--color-primary: #16A34A");
     expect(pricingAfter).not.toContain("#A21CAF");
   });
+
+  test("adding a root see.json to a plain share upgrades it to a bundle and injects tweaks", async () => {
+    const { app } = await testApp();
+    // A plain single-HTML share starts as kind "html", no injection.
+    const payload = await (await uploadFiles(app, [indexFile()], { editToken: "pw" })).json();
+    expect(payload.kind).toBe("html");
+
+    const before = await (await app.fetch(new Request(`http://share.test/content/${payload.id}/`))).text();
+    // No injected (space-prefixed) :root block before the manifest is added.
+    expect(rootStyle(before)).toBe("");
+
+    // Add see.json via the resource API.
+    const add = await addResources(app, payload.id, [manifestFile(manifest())], { token: "pw" });
+    expect(add.status).toBe(200);
+
+    // The share is now a bundle...
+    const meta = await (await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}`))).json();
+    expect(meta.kind).toBe("bundle");
+
+    // ...and the served HTML now carries the injected cssVar style.
+    const after = await (await app.fetch(new Request(`http://share.test/content/${payload.id}/`))).text();
+    expect(rootStyle(after)).toContain("--color-primary: #D97757");
+  });
+
+  test("adding an invalid see.json via the resource API is rejected and leaves the kind unchanged", async () => {
+    const { app } = await testApp();
+    const payload = await (await uploadFiles(app, [indexFile()], { editToken: "pw" })).json();
+    expect(payload.kind).toBe("html");
+
+    // homepage pointing at a page that does not exist must fail loudly.
+    const bad = await addResources(
+      app,
+      payload.id,
+      [manifestFile(manifest({ homepage: "missing.html" }))],
+      { token: "pw" },
+    );
+    expect([400, 422]).toContain(bad.status);
+    expect((await bad.json()).code).toBe("invalid_manifest");
+
+    // Malformed JSON is likewise rejected.
+    const badJson = await addResources(app, payload.id, [manifestFile("{ not json")], { token: "pw" });
+    expect([400, 422]).toContain(badJson.status);
+    expect((await badJson.json()).code).toBe("invalid_manifest");
+
+    // The share stays a plain html share — never half-upgraded to a broken bundle.
+    const meta = await (await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}`))).json();
+    expect(meta.kind).toBe("html");
+  });
+
+  test("deleting a bundle's see.json downgrades it to a resources share and stops injecting", async () => {
+    const { app } = await testApp();
+    const payload = await (await uploadFiles(app, [indexFile(), manifestFile(manifest())], { editToken: "pw" })).json();
+    expect(payload.kind).toBe("bundle");
+
+    const before = await (await app.fetch(new Request(`http://share.test/content/${payload.id}/`))).text();
+    expect(rootStyle(before)).toContain("--color-primary: #D97757");
+
+    const del = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/resources/see.json`, {
+        method: "DELETE",
+        headers: { authorization: "Bearer pw" },
+      }),
+    );
+    expect(del.status).toBe(200);
+
+    const meta = await (await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}`))).json();
+    expect(meta.kind).not.toBe("bundle");
+    expect(meta.kind).toBe("resources");
+
+    const after = await (await app.fetch(new Request(`http://share.test/content/${payload.id}/`))).text();
+    // Injection stops once the manifest is gone (the raw fixture :root has no space).
+    expect(rootStyle(after)).toBe("");
+  });
+
+  test("a create-path multipart upload of index.html + see.json yields kind bundle", async () => {
+    const { app } = await testApp();
+    const payload = await (await uploadFiles(app, [indexFile(), manifestFile(manifest())], { editToken: "pw" })).json();
+    expect(payload.kind).toBe("bundle");
+  });
 });
 
 async function testApp(env: Record<string, string> = {}): Promise<{ app: StaticShareApp }> {
@@ -445,6 +524,27 @@ async function uploadFiles(
     new Request("http://share.test/api/uploads", {
       method: "POST",
       headers: new Headers({ "x-forwarded-for": "203.0.113.10" }),
+      body: formData,
+    }),
+  );
+}
+
+async function addResources(
+  app: StaticShareApp,
+  id: string,
+  files: File[],
+  options: { token?: string } = {},
+): Promise<Response> {
+  const formData = new FormData();
+  files.forEach((file) => formData.append("file", file));
+  const headers = new Headers();
+  if (options.token) {
+    headers.set("authorization", `Bearer ${options.token}`);
+  }
+  return app.fetch(
+    new Request(`http://share.test/api/uploads/${id}/resources`, {
+      method: "POST",
+      headers,
       body: formData,
     }),
   );

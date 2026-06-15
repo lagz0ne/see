@@ -105,8 +105,19 @@ export class UploadsRepository {
       extractedBytes: number;
       fileCount: number;
       metadataJson: string;
+      kind?: UploadKind;
     },
   ): void {
+    if (values.kind !== undefined) {
+      this.db
+        .query(
+          `UPDATE uploads
+            SET sha256 = ?, extracted_bytes = ?, file_count = ?, metadata_json = ?, kind = ?
+            WHERE id = ? AND status = 'ready'`,
+        )
+        .run(values.sha256, values.extractedBytes, values.fileCount, values.metadataJson, values.kind, id);
+      return;
+    }
     this.db
       .query(
         `UPDATE uploads
