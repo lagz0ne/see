@@ -1,7 +1,9 @@
 import type { ApplyResult, JsonOp, OpResult } from "./types";
 
 // Apply JSON Pointer (RFC 6901) addressed mutations to a JSON document. A
-// pointer addresses exactly one location, so `matched` is 0 or 1. Indentation
+// pointer addresses exactly one location, so `matched` is 0 or 1. Most actions
+// require their parent location to already exist; `set` is the exception — it
+// auto-creates missing intermediate object parents (mkdir -p style). Indentation
 // is sniffed from the source so re-serialized files stay diff-friendly.
 export function applyJsonOps(source: string, ops: JsonOp[]): ApplyResult {
   let root: unknown;
@@ -45,7 +47,10 @@ function applyOne(root: unknown, op: JsonOp): Outcome {
   }
 
   const key = tokens[tokens.length - 1]!;
-  const parent = navigate(root, tokens.slice(0, -1));
+  const parent =
+    op.action === "set"
+      ? navigateOrCreate(root, tokens.slice(0, -1))
+      : navigate(root, tokens.slice(0, -1));
   if (parent === undefined || parent === null || typeof parent !== "object") {
     return { matched: 0, applied: false };
   }
@@ -100,6 +105,34 @@ function navigate(root: unknown, tokens: string[]): unknown {
       const obj = current as Record<string, unknown>;
       if (!(token in obj)) return undefined;
       current = obj[token];
+    }
+  }
+  return current;
+}
+
+// Like `navigate`, but for the `set` action's parent lookup: missing object
+// keys are created (`{}`) so deep paths can be addressed without first building
+// every ancestor. Returns `undefined` on a conflict (would clobber existing
+// data) so the caller cleanly no-ops instead of destroying scalars/arrays.
+function navigateOrCreate(root: unknown, tokens: string[]): unknown {
+  let current = root;
+  for (const token of tokens) {
+    if (current === null || typeof current !== "object") return undefined;
+    if (Array.isArray(current)) {
+      const i = arrayIndex(token, current.length, false);
+      if (i < 0 || i >= current.length) return undefined;
+      current = current[i];
+    } else {
+      const obj = current as Record<string, unknown>;
+      if (!(token in obj)) {
+        const created = {};
+        obj[token] = created;
+        current = created;
+      } else {
+        const existing = obj[token];
+        if (existing === null || typeof existing !== "object") return undefined;
+        current = existing;
+      }
     }
   }
   return current;

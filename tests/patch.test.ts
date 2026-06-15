@@ -91,6 +91,56 @@ describe("json patching", () => {
     expect(r.changed).toBe(false);
     expect(r.results[0].error).toContain("not valid JSON");
   });
+
+  test("set auto-creates missing intermediate object parents", () => {
+    const r = applyJsonOps(`{}`, [
+      { pointer: "/pages/pricing.html/tweaks/primaryColor/value", action: "set", value: "#0A84FF" },
+    ]);
+    expect(r.results[0]).toEqual({ matched: 1, applied: true });
+    expect(r.changed).toBe(true);
+    expect(JSON.parse(r.output)).toEqual({
+      pages: { "pricing.html": { tweaks: { primaryColor: { value: "#0A84FF" } } } },
+    });
+  });
+
+  test("set through an existing scalar is a no-op conflict (not clobbered)", () => {
+    const src = `{"a":5}`;
+    const r = applyJsonOps(src, [{ pointer: "/a/b", action: "set", value: 1 }]);
+    expect(r.results[0]).toEqual({ matched: 0, applied: false });
+    expect(r.changed).toBe(false);
+    expect(r.output).toBe(src);
+  });
+
+  test("set descending through an existing object preserves siblings", () => {
+    const r = applyJsonOps(`{"pages":{"x.html":{"tweaks":{"keep":1}}}}`, [
+      { pointer: "/pages/x.html/tweaks/add", action: "set", value: 2 },
+    ]);
+    expect(r.results[0]).toEqual({ matched: 1, applied: true });
+    expect(JSON.parse(r.output).pages["x.html"].tweaks).toEqual({ keep: 1, add: 2 });
+  });
+
+  test("auto-create is set-only: remove/append/insert still no-op on missing parent", () => {
+    const r = applyJsonOps(`{}`, [
+      { pointer: "/nope/x", action: "remove" },
+      { pointer: "/nope/x", action: "append", value: 1 },
+      { pointer: "/nope/x", action: "insert", value: 1 },
+    ]);
+    expect(r.results).toEqual([
+      { matched: 0, applied: false },
+      { matched: 0, applied: false },
+      { matched: 0, applied: false },
+    ]);
+    expect(r.changed).toBe(false);
+  });
+
+  test("array set semantics unaffected: '-' appends, index replaces", () => {
+    const r = applyJsonOps(`{"arr":[1,2]}`, [
+      { pointer: "/arr/0", action: "set", value: 9 },
+      { pointer: "/arr/-", action: "set", value: 3 },
+    ]);
+    expect(r.results.map((x) => x.applied)).toEqual([true, true]);
+    expect(JSON.parse(r.output).arr).toEqual([9, 2, 3]);
+  });
 });
 
 describe("css patching", () => {
