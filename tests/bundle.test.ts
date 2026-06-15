@@ -22,11 +22,9 @@ function manifest(extra: Record<string, unknown> = {}): string {
     homepage: "index.html",
     exposed: ["index.html"],
     bar: false,
-    capabilities: ["inspect", "tweaks"],
     tweaks: {
       primaryColor: { kind: "color", value: "#D97757", cssVar: "--color-primary", label: "Primary" },
     },
-    inspect: [{ selector: ".hero", id: "hero", label: "Hero" }],
     ...extra,
   });
 }
@@ -35,8 +33,21 @@ function indexFile(): File {
   return new File([INDEX_HTML], "index.html", { type: "text/html" });
 }
 
+function htmlFile(name: string, body: string): File {
+  return new File([body], name, { type: "text/html" });
+}
+
 function manifestFile(body: string): File {
   return new File([body], "see.json", { type: "application/json" });
+}
+
+// Extracts the contents of the INJECTED <style>:root{ ... }</style> block.
+// The injected block is emitted as `<style>:root{ <decls> }</style>` (note the
+// space after `{`), which distinguishes it from any pre-existing `:root` style
+// already present in the source HTML fixture.
+function rootStyle(html: string): string {
+  const match = html.match(/<style>:root\{ ([^]*?) \}<\/style>/);
+  return match ? match[1] : "";
 }
 
 describe("bundles", () => {
@@ -55,23 +66,23 @@ describe("bundles", () => {
     expect(settings.tweaks).toEqual({ primaryColor: "#D97757" });
   });
 
-  test("a bundle's HTML is served with the injected SDK + __SEE_BUNDLE__ config", async () => {
+  test("a bundle's HTML is served with the static cssVar style injected", async () => {
     const { app } = await testApp();
     const payload = await (await uploadFiles(app, [indexFile(), manifestFile(manifest())], { editToken: "pw" })).json();
 
     const content = await app.fetch(new Request(`http://share.test/content/${payload.id}/`));
     expect(content.status).toBe(200);
     const html = await content.text();
-    expect(html).toContain("window.__SEE_BUNDLE__");
-    expect(html).toContain("http://share.test/sdk/see-inspect.js");
-    expect(html).toContain('"capabilities"');
+    // Static <style> block must be present with the cssVar and tweak value.
+    expect(html).toContain("<style");
+    expect(html).toContain("--color-primary");
     expect(html).toContain("#D97757");
     // Original markup is preserved.
     expect(html).toContain('<div class="hero">Hi</div>');
 
     // The manifest file itself is served raw, never rewritten.
     const raw = await app.fetch(new Request(`http://share.test/content/${payload.id}/see.json`));
-    expect(await raw.text()).not.toContain("__SEE_BUNDLE__");
+    expect(await raw.text()).not.toContain("<style");
   });
 
   test("a non-bundle upload's HTML is served byte-for-byte unchanged", async () => {
@@ -86,9 +97,10 @@ describe("bundles", () => {
   test("an invalid see.json rejects the upload with 400 invalid_manifest", async () => {
     const { app } = await testApp();
 
-    const badSchema = await uploadFiles(app, [indexFile(), manifestFile(JSON.stringify({ capabilities: ["bogus"] }))]);
-    expect(badSchema.status).toBe(400);
-    expect((await badSchema.json()).code).toBe("invalid_manifest");
+    // A tweak entry missing the required "value" field is rejected.
+    const badTweak = await uploadFiles(app, [indexFile(), manifestFile(JSON.stringify({ tweaks: { primary: { cssVar: "--color-primary" } } }))]);
+    expect(badTweak.status).toBe(400);
+    expect((await badTweak.json()).code).toBe("invalid_manifest");
 
     const badJson = await uploadFiles(app, [indexFile(), manifestFile("{ not json")]);
     expect(badJson.status).toBe(400);
@@ -141,12 +153,13 @@ describe("bundles", () => {
     const { app } = await testApp();
     const payload = await (await uploadFiles(app, [indexFile(), manifestFile(manifest())], { editToken: "pw" })).json();
 
+    // Setting a tweak's value to an object (invalid — must be a primitive) causes a validation failure.
     const patch = await app.fetch(
       new Request(`http://share.test/api/uploads/${payload.id}/patch`, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: "Bearer pw" },
         body: JSON.stringify({
-          ops: [{ file: "see.json", pointer: "/capabilities", action: "set", value: ["bogus"] }],
+          ops: [{ file: "see.json", pointer: "/tweaks/primaryColor/value", action: "set", value: { nested: true } }],
         }),
       }),
     );
@@ -181,6 +194,219 @@ describe("bundles", () => {
     );
     expect(passwordOk.status).toBe(200);
     expect((await passwordOk.json()).passwordRequired).toBe(true);
+  });
+
+  test("per-page tweak override injects the page value on the overridden page and the shared value elsewhere", async () => {
+    const { app } = await testApp();
+    const see = manifest({
+      exposed: ["index.html", "pricing.html"],
+      pages: {
+        "pricing.html": {
+          tweaks: {
+            primaryColor: { value: "#0A84FF" },
+          },
+        },
+      },
+    });
+    const payload = await (
+      await uploadFiles(
+        app,
+        [
+          indexFile(),
+          htmlFile("pricing.html", "<!doctype html><html><head></head><body><h1>Pricing</h1></body></html>"),
+          manifestFile(see),
+        ],
+        { editToken: "pw" },
+      )
+    ).json();
+    expect(payload.kind).toBe("bundle");
+
+    // The overridden page emits the page's value for the overridden id.
+    const pricing = await app.fetch(new Request(`http://share.test/content/${payload.id}/pricing.html`));
+    expect(pricing.status).toBe(200);
+    const pricingStyle = rootStyle(await pricing.text());
+    expect(pricingStyle).toContain("--color-primary: #0A84FF");
+    expect(pricingStyle).not.toContain("#D97757");
+
+    // The non-overridden page emits the shared value.
+    const index = await app.fetch(new Request(`http://share.test/content/${payload.id}/index.html`));
+    expect(index.status).toBe(200);
+    const indexStyle = rootStyle(await index.text());
+    expect(indexStyle).toContain("--color-primary: #D97757");
+    expect(indexStyle).not.toContain("#0A84FF");
+  });
+
+  test("a value-only page override inherits the shared cssVar and unit", async () => {
+    const { app } = await testApp();
+    const see = manifest({
+      exposed: ["index.html", "pricing.html"],
+      tweaks: {
+        primaryColor: { kind: "color", value: "#D97757", cssVar: "--color-primary", label: "Primary" },
+        fontSize: { kind: "number", value: 16, cssVar: "--font-size-base", unit: "px", label: "Font size" },
+      },
+      pages: {
+        "pricing.html": {
+          tweaks: {
+            // Value-only override — cssVar/unit are inherited from the shared fontSize def.
+            fontSize: { value: 20 },
+          },
+        },
+      },
+    });
+    const payload = await (
+      await uploadFiles(
+        app,
+        [
+          indexFile(),
+          htmlFile("pricing.html", "<!doctype html><html><head></head><body><h1>Pricing</h1></body></html>"),
+          manifestFile(see),
+        ],
+        { editToken: "pw" },
+      )
+    ).json();
+    expect(payload.kind).toBe("bundle");
+
+    const pricing = await app.fetch(new Request(`http://share.test/content/${payload.id}/pricing.html`));
+    const pricingStyle = rootStyle(await pricing.text());
+    // Inherited cssVar + unit, page-overridden value.
+    expect(pricingStyle).toContain("--font-size-base: 20px");
+
+    // The non-overridden page keeps the shared value.
+    const index = await app.fetch(new Request(`http://share.test/content/${payload.id}/index.html`));
+    const indexStyle = rootStyle(await index.text());
+    expect(indexStyle).toContain("--font-size-base: 16px");
+  });
+
+  test("a page-only knob is injected only on its page and absent elsewhere", async () => {
+    const { app } = await testApp();
+    const see = manifest({
+      exposed: ["index.html", "pricing.html"],
+      pages: {
+        "pricing.html": {
+          tweaks: {
+            // A page-only knob with its own cssVar, not present in the shared set.
+            accent: { kind: "color", value: "#22C55E", cssVar: "--color-accent", label: "Accent" },
+          },
+        },
+      },
+    });
+    const payload = await (
+      await uploadFiles(
+        app,
+        [
+          indexFile(),
+          htmlFile("pricing.html", "<!doctype html><html><head></head><body><h1>Pricing</h1></body></html>"),
+          manifestFile(see),
+        ],
+        { editToken: "pw" },
+      )
+    ).json();
+    expect(payload.kind).toBe("bundle");
+
+    const pricing = await app.fetch(new Request(`http://share.test/content/${payload.id}/pricing.html`));
+    const pricingStyle = rootStyle(await pricing.text());
+    expect(pricingStyle).toContain("--color-accent: #22C55E");
+
+    const index = await app.fetch(new Request(`http://share.test/content/${payload.id}/index.html`));
+    const indexStyle = rootStyle(await index.text());
+    expect(indexStyle).not.toContain("--color-accent");
+    expect(indexStyle).not.toContain("#22C55E");
+  });
+
+  test("a pages key pointing at a non-existent HTML page is rejected on upload with 400 invalid_manifest", async () => {
+    const { app } = await testApp();
+    const bad = await uploadFiles(
+      app,
+      [
+        indexFile(),
+        manifestFile(
+          manifest({
+            pages: {
+              "missing.html": {
+                tweaks: { primaryColor: { value: "#0A84FF" } },
+              },
+            },
+          }),
+        ),
+      ],
+      { editToken: "pw" },
+    );
+    expect(bad.status).toBe(400);
+    expect((await bad.json()).code).toBe("invalid_manifest");
+  });
+
+  test("patching a page tweak value updates only that page, leaving shared and other pages unchanged, and bumps the revision", async () => {
+    const { app } = await testApp();
+    const see = manifest({
+      exposed: ["index.html", "pricing.html"],
+      pages: {
+        "pricing.html": {
+          tweaks: { primaryColor: { value: "#0A84FF" } },
+        },
+      },
+    });
+    const payload = await (
+      await uploadFiles(
+        app,
+        [
+          indexFile(),
+          htmlFile("pricing.html", "<!doctype html><html><head></head><body><h1>Pricing</h1></body></html>"),
+          manifestFile(see),
+        ],
+        { editToken: "pw" },
+      )
+    ).json();
+    expect(payload.kind).toBe("bundle");
+
+    // Patch ONLY pricing.html's page tweak value.
+    const patch = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/patch`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer pw" },
+        body: JSON.stringify({
+          ops: [{ file: "see.json", pointer: "/pages/pricing.html/tweaks/primaryColor/value", action: "set", value: "#16A34A" }],
+        }),
+      }),
+    );
+    expect(patch.status).toBe(200);
+    expect((await patch.json()).revision).toBe(2);
+
+    // The overridden page reflects the new page value...
+    const pricingStyle = rootStyle(
+      await (await app.fetch(new Request(`http://share.test/content/${payload.id}/pricing.html`))).text(),
+    );
+    expect(pricingStyle).toContain("--color-primary: #16A34A");
+
+    // ...the shared default and the inheriting page are untouched.
+    const indexStyle = rootStyle(
+      await (await app.fetch(new Request(`http://share.test/content/${payload.id}/index.html`))).text(),
+    );
+    expect(indexStyle).toContain("--color-primary: #D97757");
+
+    // Patching the SHARED value changes the inheriting page but NOT the page that overrides it.
+    const sharedPatch = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/patch`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer pw" },
+        body: JSON.stringify({
+          ops: [{ file: "see.json", pointer: "/tweaks/primaryColor/value", action: "set", value: "#A21CAF" }],
+        }),
+      }),
+    );
+    expect(sharedPatch.status).toBe(200);
+    expect((await sharedPatch.json()).revision).toBe(3);
+
+    const indexAfter = rootStyle(
+      await (await app.fetch(new Request(`http://share.test/content/${payload.id}/index.html`))).text(),
+    );
+    expect(indexAfter).toContain("--color-primary: #A21CAF");
+
+    const pricingAfter = rootStyle(
+      await (await app.fetch(new Request(`http://share.test/content/${payload.id}/pricing.html`))).text(),
+    );
+    // The page override still wins; the shared change does not leak through.
+    expect(pricingAfter).toContain("--color-primary: #16A34A");
+    expect(pricingAfter).not.toContain("#A21CAF");
   });
 });
 

@@ -5,6 +5,7 @@ export type WorkspaceSettings = {
   exposed?: string[];   // resource paths of navigable HTML pages
   barDefault?: boolean; // default visibility of the viewer chrome/inspector bar
   tweaks?: Record<string, string | number | boolean>; // named design knobs with primitive values
+  pageTweaks?: Record<string, Record<string, string | number | boolean>>; // page path -> tweak id -> value
 };
 
 // Per-tweak control metadata derived from a bundle's see.json (the *definitions*, minus
@@ -21,18 +22,11 @@ export type TweakDef = {
   options?: string[]; // for kind: "select"
 };
 
-export type InspectTarget = {
-  selector: string;
-  id?: string;
-  label?: string;
-};
-
 // Manifest-derived extras the HTML injector forwards to the SDK for a bundle. Kept
 // separate from WorkspaceSettings so the workspace shape is unchanged.
 export type BundleState = {
-  capabilities: string[];                  // subset of ["inspect", "tweaks"]
   tweakDefs?: Record<string, TweakDef>;
-  inspect?: InspectTarget[];
+  pageTweakDefs?: Record<string, Record<string, TweakDef>>; // page path -> tweak id -> control metadata
 };
 
 export type UploadMetadata = {
@@ -41,8 +35,6 @@ export type UploadMetadata = {
   workspace?: WorkspaceSettings;
   bundle?: BundleState;
 };
-
-const ALLOWED_CAPABILITIES = ["inspect", "tweaks"];
 
 export function parseUploadMetadata(value: string | null): UploadMetadata {
   if (!value) {
@@ -79,8 +71,29 @@ export function parseUploadMetadata(value: string | null): UploadMetadata {
           ws.tweaks = validTweaks;
         }
       }
+      if (raw["pageTweaks"] && typeof raw["pageTweaks"] === "object" && !Array.isArray(raw["pageTweaks"])) {
+        const rawPageTweaks = raw["pageTweaks"] as Record<string, unknown>;
+        const validPageTweaks: Record<string, Record<string, string | number | boolean>> = {};
+        for (const [page, pageValue] of Object.entries(rawPageTweaks)) {
+          if (!pageValue || typeof pageValue !== "object" || Array.isArray(pageValue)) {
+            continue;
+          }
+          const validTweaks: Record<string, string | number | boolean> = {};
+          for (const [k, v] of Object.entries(pageValue as Record<string, unknown>)) {
+            if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+              validTweaks[k] = v;
+            }
+          }
+          if (Object.keys(validTweaks).length > 0) {
+            validPageTweaks[page] = validTweaks;
+          }
+        }
+        if (Object.keys(validPageTweaks).length > 0) {
+          ws.pageTweaks = validPageTweaks;
+        }
+      }
       // Only include workspace if at least one valid field was found
-      if (ws.homepage !== undefined || ws.exposed !== undefined || ws.barDefault !== undefined || ws.tweaks !== undefined) {
+      if (ws.homepage !== undefined || ws.exposed !== undefined || ws.barDefault !== undefined || ws.tweaks !== undefined || ws.pageTweaks !== undefined) {
         workspace = ws;
       }
     }
@@ -106,12 +119,6 @@ function parseBundleState(raw: unknown): BundleState | undefined {
   }
   const obj = raw as Record<string, unknown>;
 
-  const capabilities = Array.isArray(obj["capabilities"])
-    ? (obj["capabilities"] as unknown[]).filter(
-        (c): c is string => typeof c === "string" && ALLOWED_CAPABILITIES.includes(c),
-      )
-    : [];
-
   let tweakDefs: Record<string, TweakDef> | undefined;
   if (obj["tweakDefs"] && typeof obj["tweakDefs"] === "object" && !Array.isArray(obj["tweakDefs"])) {
     const out: Record<string, TweakDef> = {};
@@ -125,33 +132,34 @@ function parseBundleState(raw: unknown): BundleState | undefined {
     }
   }
 
-  let inspect: InspectTarget[] | undefined;
-  if (Array.isArray(obj["inspect"])) {
-    const out: InspectTarget[] = [];
-    for (const entry of obj["inspect"] as unknown[]) {
-      if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-        const e = entry as Record<string, unknown>;
-        if (typeof e["selector"] === "string") {
-          out.push({
-            selector: e["selector"],
-            ...(typeof e["id"] === "string" ? { id: e["id"] } : {}),
-            ...(typeof e["label"] === "string" ? { label: e["label"] } : {}),
-          });
+  let pageTweakDefs: Record<string, Record<string, TweakDef>> | undefined;
+  if (obj["pageTweakDefs"] && typeof obj["pageTweakDefs"] === "object" && !Array.isArray(obj["pageTweakDefs"])) {
+    const out: Record<string, Record<string, TweakDef>> = {};
+    for (const [page, pageValue] of Object.entries(obj["pageTweakDefs"] as Record<string, unknown>)) {
+      if (!pageValue || typeof pageValue !== "object" || Array.isArray(pageValue)) {
+        continue;
+      }
+      const inner: Record<string, TweakDef> = {};
+      for (const [key, value] of Object.entries(pageValue as Record<string, unknown>)) {
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+          inner[key] = sanitizeTweakDef(value as Record<string, unknown>);
         }
       }
+      if (Object.keys(inner).length > 0) {
+        out[page] = inner;
+      }
     }
-    if (out.length > 0) {
-      inspect = out;
+    if (Object.keys(out).length > 0) {
+      pageTweakDefs = out;
     }
   }
 
-  if (capabilities.length === 0 && tweakDefs === undefined && inspect === undefined) {
+  if (tweakDefs === undefined && pageTweakDefs === undefined) {
     return undefined;
   }
   return {
-    capabilities,
-    ...(tweakDefs !== undefined ? { tweakDefs } : {}),
-    ...(inspect !== undefined ? { inspect } : {}),
+    ...(tweakDefs ? { tweakDefs } : {}),
+    ...(pageTweakDefs ? { pageTweakDefs } : {}),
   };
 }
 

@@ -385,18 +385,7 @@ describe("static app share service", () => {
     expect(await content.text()).toContain("origin");
   });
 
-  test("serves the opt-in inspector SDK on the public origin", async () => {
-    const { app } = await testApp();
-    const response = await app.fetch(new Request("http://share.test/sdk/see-inspect.js"));
-
-    expect(response.status).toBe(200);
-    expect(response.headers.get("content-type")).toContain("text/javascript");
-    const body = await response.text();
-    expect(body).toContain("see-inspect");
-    expect(body).toContain("data-see-inspectable");
-  });
-
-  test("viewer exposes the content origin and allows display-capture", async () => {
+  test("viewer exposes display-capture permission header", async () => {
     const { app } = await testApp();
     const payload = await (
       await uploadFile(app, new File(["<h1>x</h1>"], "index.html", { type: "text/html" }))
@@ -404,17 +393,6 @@ describe("static app share service", () => {
 
     const viewer = await app.fetch(new Request(payload.viewerUrl));
     expect(viewer.headers.get("permissions-policy")).toContain("display-capture=(self)");
-    expect(await viewer.text()).toContain('data-content-origin="http://share.test"');
-  });
-
-  test("viewer content origin reflects a configured content origin", async () => {
-    const { app } = await testApp({ CONTENT_BASE_URL: "http://content.test" });
-    const payload = await (
-      await uploadFile(app, new File(["<h1>x</h1>"], "index.html", { type: "text/html" }))
-    ).json();
-
-    const viewer = await app.fetch(new Request(payload.viewerUrl));
-    expect(await viewer.text()).toContain('data-content-origin="http://content.test"');
   });
 
   test("GET /api/uploads/:id/settings returns defaults for a password-protected upload", async () => {
@@ -566,16 +544,15 @@ describe("static app share service", () => {
     expect(await viewer.text()).toContain('data-bar-default="true"');
   });
 
-  test("GET /llms.txt returns 200 with text/plain containing SDK and protocol docs", async () => {
+  test("GET /llms.txt returns 200 with text/plain containing bundle and static tweaks docs", async () => {
     const { app } = await testApp();
     const response = await app.fetch(new Request("http://share.test/llms.txt"));
 
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/plain");
     const body = await response.text();
-    expect(body).toContain("data-see-inspectable");
-    expect(body).toContain("TWEAK_DEFAULTS");
-    expect(body).toContain("see-inspect.js");
+    expect(body).toContain("cssVar");
+    expect(body).toContain("see.json");
   });
 
   test("GET /api/uploads/:id/settings includes tweaks:{} by default", async () => {
@@ -640,33 +617,110 @@ describe("static app share service", () => {
     expect(await nestedRejected.json()).toMatchObject({ code: "invalid_setting" });
   });
 
-  test("viewer page contains data-tweaks when tweaks are saved, omits it otherwise", async () => {
+  test("bundle served HTML gets static cssVar style injected; plain upload does not", async () => {
     const { app } = await testApp();
-    const payload = await (
-      await uploadFile(app, new File(["<h1>tweaks</h1>"], "index.html", { type: "text/html" }), { editToken: "tw" })
+
+    // Build a bundle with a tweak that has a cssVar.
+    const seeJson = JSON.stringify({
+      homepage: "index.html",
+      tweaks: {
+        primaryColor: { kind: "color", value: "#D97757", cssVar: "--color-primary", label: "Primary" },
+      },
+    });
+    const bundlePayload = await (
+      await uploadFiles(app, [
+        new File(["<!doctype html><html><head></head><body><h1>Bundle</h1></body></html>"], "index.html", { type: "text/html" }),
+        new File([seeJson], "see.json", { type: "application/json" }),
+      ])
     ).json();
+    expect(bundlePayload.kind).toBe("bundle");
 
-    // Without tweaks: data-tweaks must be absent
-    const viewerBefore = await app.fetch(new Request(payload.viewerUrl));
-    expect(viewerBefore.status).toBe(200);
-    expect(await viewerBefore.text()).not.toContain("data-tweaks");
+    // The served HTML must contain the injected <style> with the cssVar and value.
+    const bundleContent = await app.fetch(new Request(`http://share.test/content/${bundlePayload.id}/`));
+    expect(bundleContent.status).toBe(200);
+    const bundleHtml = await bundleContent.text();
+    expect(bundleHtml).toContain("<style");
+    expect(bundleHtml).toContain("--color-primary");
+    expect(bundleHtml).toContain("#D97757");
 
-    // Save tweaks
-    await app.fetch(
+    // A plain (non-bundle) upload's served HTML must NOT contain an injected :root style block.
+    const plainPayload = await (
+      await uploadFile(app, new File(["<!doctype html><html><head></head><body><h1>Plain</h1></body></html>"], "index.html", { type: "text/html" }))
+    ).json();
+    const plainContent = await app.fetch(new Request(`http://share.test/content/${plainPayload.id}/`));
+    expect(plainContent.status).toBe(200);
+    const plainHtml = await plainContent.text();
+    expect(plainHtml).not.toContain("<style>:root");
+  });
+
+  test("homepage page-override applies when served via the share root and via the explicit homepage path", async () => {
+    const { app } = await testApp();
+    const seeJson = JSON.stringify({
+      homepage: "index.html",
+      exposed: ["index.html"],
+      tweaks: {
+        primaryColor: { kind: "color", value: "#D97757", cssVar: "--color-primary", label: "Primary" },
+      },
+      pages: {
+        "index.html": {
+          tweaks: { primaryColor: { value: "#0A84FF" } },
+        },
+      },
+    });
+    const payload = await (
+      await uploadFiles(app, [
+        new File(["<!doctype html><html><head></head><body><h1>Home</h1></body></html>"], "index.html", { type: "text/html" }),
+        new File([seeJson], "see.json", { type: "application/json" }),
+      ])
+    ).json();
+    expect(payload.kind).toBe("bundle");
+
+    // Served via the share root ("/").
+    const root = await app.fetch(new Request(`http://share.test/content/${payload.id}/`));
+    expect(root.status).toBe(200);
+    const rootHtml = await root.text();
+    expect(rootHtml).toContain("<style>:root{");
+    expect(rootHtml).toContain("--color-primary: #0A84FF");
+    expect(rootHtml).not.toContain("#D97757");
+
+    // Served via the explicit homepage path.
+    const explicit = await app.fetch(new Request(`http://share.test/content/${payload.id}/index.html`));
+    expect(explicit.status).toBe(200);
+    const explicitHtml = await explicit.text();
+    expect(explicitHtml).toContain("--color-primary: #0A84FF");
+    expect(explicitHtml).not.toContain("#D97757");
+  });
+
+  test("Settings PATCH on a bundle rejects pageTweaks with bundle_managed", async () => {
+    const { app } = await testApp();
+    const seeJson = JSON.stringify({
+      homepage: "index.html",
+      exposed: ["index.html"],
+      tweaks: {
+        primaryColor: { kind: "color", value: "#D97757", cssVar: "--color-primary", label: "Primary" },
+      },
+    });
+    const payload = await (
+      await uploadFiles(
+        app,
+        [
+          new File(["<!doctype html><html><head></head><body><h1>Home</h1></body></html>"], "index.html", { type: "text/html" }),
+          new File([seeJson], "see.json", { type: "application/json" }),
+        ],
+        { editToken: "pw" },
+      )
+    ).json();
+    expect(payload.kind).toBe("bundle");
+
+    const rejected = await app.fetch(
       new Request(`http://share.test/api/uploads/${payload.id}/settings`, {
         method: "PATCH",
-        headers: { authorization: "Bearer tw", "content-type": "application/json" },
-        body: JSON.stringify({ tweaks: { primaryColor: "#fff", fontSize: 18, dark: true } }),
+        headers: { "content-type": "application/json", authorization: "Bearer pw" },
+        body: JSON.stringify({ pageTweaks: { "index.html": { primaryColor: "#0A84FF" } } }),
       }),
     );
-
-    // With tweaks: data-tweaks must be present with escaped JSON
-    const viewerAfter = await app.fetch(new Request(payload.viewerUrl));
-    expect(viewerAfter.status).toBe(200);
-    const html = await viewerAfter.text();
-    expect(html).toContain("data-tweaks=");
-    expect(html).toContain("primaryColor");
-    expect(html).toContain("#fff");
+    expect(rejected.status).toBe(400);
+    expect((await rejected.json()).code).toBe("bundle_managed");
   });
 
   test("GET /api/uploads/:id/events returns SSE stream with initial revision event", async () => {

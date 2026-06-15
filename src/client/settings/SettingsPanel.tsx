@@ -138,13 +138,11 @@ export function SettingsPanel({
   uploadId,
   contentRoot: _contentRoot,
   resourceRevision,
-  currentTweaks,
   onHomeChanged,
 }: {
   uploadId: string;
   contentRoot: string;
   resourceRevision: number;
-  currentTweaks?: Record<string, string | number | boolean>;
   onHomeChanged?: () => void;
 }) {
   const [settings, setSettings] = useState<UploadSettings | null>(null);
@@ -164,10 +162,6 @@ export function SettingsPanel({
   const [newPassword, setNewPassword] = useState("");
   const [pwStatus, setPwStatus] = useState<StatusState>({ message: "", tone: "neutral" });
   const [pwBusy, setPwBusy] = useState(false);
-
-  // Save-tweaks-to-share
-  const [tweaksStatus, setTweaksStatus] = useState<StatusState>({ message: "", tone: "neutral" });
-  const [tweaksBusy, setTweaksBusy] = useState(false);
 
   // Load settings on mount
   useEffect(() => {
@@ -250,29 +244,9 @@ export function SettingsPanel({
     }
   }
 
-  async function handleSaveTweaks() {
-    if (!settings || !currentTweaks) return;
-    setTweaksBusy(true);
-    setTweaksStatus({ message: "", tone: "neutral" });
-    try {
-      const updated = await patchSettings(uploadId, password, settings.passwordRequired, { tweaks: currentTweaks });
-      setSettings(updated);
-      setTweaksStatus({ message: "Tweaks saved to the share.", tone: "success" });
-    } catch (err: unknown) {
-      setTweaksStatus({
-        message: err instanceof Error ? err.message : "Save failed.",
-        tone: "error",
-      });
-    } finally {
-      setTweaksBusy(false);
-    }
-  }
-
   if (!settings && loadStatus.message) {
     return <StatusPill status={loadStatus} />;
   }
-
-  const tweakCount = currentTweaks ? Object.keys(currentTweaks).length : 0;
 
   const htmlPages = settings?.htmlPages ?? [];
   const passwordRequired = settings?.passwordRequired ?? false;
@@ -431,35 +405,6 @@ export function SettingsPanel({
           {pwBusy ? "Updating…" : "Update password"}
         </Button>
       </FieldGroup>
-
-      {tweakCount > 0 ? (
-        <>
-          <Separator />
-          <FieldGroup className="gap-3">
-            <div className="flex items-center justify-between gap-2">
-              <p className="font-mono text-sm font-medium uppercase tracking-wider text-muted-foreground">
-                Design tweaks
-              </p>
-              <Badge variant="outline" className="font-mono text-xs">
-                {tweakCount}
-              </Badge>
-            </div>
-            <FieldDescription>
-              Persist the current tweak values to the share so every visitor sees this design.
-            </FieldDescription>
-            <StatusPill status={tweaksStatus} />
-            <Button
-              type="button"
-              variant="secondary"
-              disabled={tweaksBusy || !settings}
-              className="w-full"
-              onClick={() => void handleSaveTweaks()}
-            >
-              {tweaksBusy ? "Saving…" : "Save current tweaks to share"}
-            </Button>
-          </FieldGroup>
-        </>
-      ) : null}
 
       <Separator />
 

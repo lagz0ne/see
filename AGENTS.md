@@ -48,10 +48,14 @@ root.
   separate content origin and keep the viewer iframe sandbox without `allow-same-origin`.
   Don't loosen the viewer CSP.
 - **Bundles:** an upload with a root `see.json` is a first-class *bundle* — the manifest
-  declares capabilities, tweaks, inspect targets, and homepage/exposed/bar, and the content
-  handler injects the first-party SDK into served HTML (the one sanctioned exception to "no
-  script injection" — see the spec § Security Contract). The manifest projects onto the
-  existing `WorkspaceSettings`; agent-facing schema lives in `src/docs/llms.txt`.
+  declares `homepage`, `exposed`, `bar`, and `tweaks`. For tweaks that carry a `cssVar`
+  field, the content handler injects a single static `<style>` block of `:root` CSS custom
+  properties into served HTML (the one sanctioned exception to "no injection" — see the spec
+  § Security Contract). No script is injected. Tweaks support **per-page inheritance**: root
+  `tweaks` are shared defaults, and an optional `see.json` `pages` map carries per-page
+  overrides (partial tweaks) resolved **page-over-shared** at serve time — still zero page JS,
+  one injected `<style>` per served page. The manifest projects onto the existing
+  `WorkspaceSettings`; agent-facing schema lives in `src/docs/llms.txt`.
 
 ## Skills
 

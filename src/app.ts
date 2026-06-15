@@ -92,9 +92,6 @@ export function createApp(config: AppConfig): StaticShareApp {
       if (method === "GET" && url.pathname.startsWith("/assets/")) {
         return await handleAsset(url.pathname);
       }
-      if (method === "GET" && url.pathname === "/sdk/see-inspect.js") {
-        return await handleSdk();
-      }
       if (method === "GET" && url.pathname === "/llms.txt") {
         return await handleLlmsTxt();
       }
@@ -423,7 +420,7 @@ async function handlePatchSettings(request: Request, id: string, repo: UploadsRe
   // For a bundle, see.json owns homepage/exposed/bar/tweaks — settings come from editing
   // the manifest. The password is not in the manifest, so it stays editable here.
   if (upload.kind === "bundle") {
-    const managed = ["homepage", "exposed", "barDefault", "tweaks"].filter((key) => key in body);
+    const managed = ["homepage", "exposed", "barDefault", "tweaks", "pageTweaks"].filter((key) => key in body);
     if (managed.length > 0) {
       throw new AppError(
         400,
@@ -999,15 +996,21 @@ async function handleContentRequest(
     });
   }
 
-  // Bundle wiring: when this is a bundle that opted into capabilities and we are serving
-  // an HTML document, inject the first-party SDK + its config. This is the one place the
-  // platform writes into uploaded content — only our own SDK, only for opted-in bundles,
-  // only into sandboxed (no allow-same-origin) HTML.
+  // Bundle wiring: inject static CSS custom properties for tweak values.
+  // Only rewrites HTML when there are cssVar-backed tweaks; falls through otherwise.
   const bundle = upload.kind === "bundle" ? uploadBundle(upload) : undefined;
-  if (bundle && bundle.capabilities.length > 0 && contentType.startsWith("text/html")) {
+  // Canonical page key = the served file's resource path (root-relative, "/"-joined),
+  // matching how see.json keys pages via `exposed`/`homepage`. Deriving it from the
+  // *resolved* filePath (not assetPath) means a root request ("/") that resolved to the
+  // homepage yields the homepage's resource path (e.g. "index.html") — so a page override
+  // keyed on the homepage applies whether the viewer hits "/" or "/index.html".
+  const pagePath = filePath.startsWith(root + sep)
+    ? filePath.slice(root.length + 1).split(sep).join("/")
+    : "";
+  const style = bundle ? bundleTweakStyle(uploadWorkspace(upload), bundle, pagePath) : "";
+  if (style !== "" && contentType.startsWith("text/html")) {
     const html = await Bun.file(filePath).text();
-    const snippet = bundleInjectionSnippet(config, uploadWorkspace(upload), bundle);
-    const injected = await injectBundleSdk(html, snippet);
+    const injected = await injectBundleStyle(html, style);
     // Content-Length now reflects the rewritten body; ETag still keys on revision (which
     // bumps whenever see.json changes), so caches invalidate correctly.
     return new Response(injected, { status: 200, headers });
@@ -1127,30 +1130,6 @@ async function handleAsset(pathname: string): Promise<Response> {
     status: 200,
     headers: {
       "Content-Type": builtType,
-      "Cache-Control": "public, max-age=300",
-      "X-Content-Type-Options": "nosniff",
-    },
-  });
-}
-
-// Serves the opt-in inspector SDK that uploaded pages include with a <script> tag. Served from
-// source (not dist/) since it is hand-authored plain JS, and only on the public origin.
-async function handleSdk(): Promise<Response> {
-  const sdkPath = join(process.cwd(), "src", "sdk", "see-inspect.js");
-  try {
-    const info = await stat(sdkPath);
-    if (!info.isFile()) {
-      return textResponse("Not Found", 404);
-    }
-  } catch {
-    return textResponse("Not Found", 404);
-  }
-
-  const type = "text/javascript; charset=utf-8";
-  return new Response(Bun.file(sdkPath, { type }), {
-    status: 200,
-    headers: {
-      "Content-Type": type,
       "Cache-Control": "public, max-age=300",
       "X-Content-Type-Options": "nosniff",
     },
@@ -1319,35 +1298,65 @@ async function rederiveManifestState(
   }
 }
 
-// Build the <head> snippet that wires the first-party SDK into a bundle's served HTML:
-// an inline config the SDK reads (capabilities, tweak defs+values, inspect targets) plus
-// the SDK <script> loaded absolutely from the public origin.
-function bundleInjectionSnippet(config: AppConfig, workspace: WorkspaceSettings, bundle: BundleState): string {
-  const tweakValues = workspace.tweaks ?? {};
-  const tweakDefs = bundle.tweakDefs ?? {};
-  const tweaks: Record<string, unknown> = {};
-  for (const [id, value] of Object.entries(tweakValues)) {
-    tweaks[id] = { ...(tweakDefs[id] ?? {}), value };
+// Build a static <style> block that injects tweak CSS custom properties into :root.
+// Only tweaks with a non-empty cssVar are emitted. Values are sanitized to prevent
+// breaking out of the style element or declaration.
+function bundleTweakStyle(workspace: WorkspaceSettings, bundle: BundleState, pagePath: string): string {
+  // Resolution = page layer over shared. Shared values/defs come from the workspace +
+  // bundle top-level maps; per-page overrides inherit from them and win field-by-field.
+  const sharedValues = workspace.tweaks ?? {};
+  const sharedDefs = bundle.tweakDefs ?? {};
+  const pageValues = workspace.pageTweaks?.[pagePath] ?? {};
+  const pageDefs = bundle.pageTweakDefs?.[pagePath] ?? {};
+
+  // Iterate the union of ids across all four maps so a page can introduce ids the shared
+  // set lacks (and vice versa).
+  const ids = new Set<string>([
+    ...Object.keys(sharedValues),
+    ...Object.keys(sharedDefs),
+    ...Object.keys(pageValues),
+    ...Object.keys(pageDefs),
+  ]);
+
+  const decls: string[] = [];
+
+  for (const id of ids) {
+    const def = { ...sharedDefs[id], ...pageDefs[id] };
+    const value = pageValues[id] ?? sharedValues[id];
+    if (value === undefined) {
+      continue;
+    }
+    if (!def.cssVar || def.cssVar.length === 0) {
+      continue;
+    }
+    const cssVar = def.cssVar;
+    const unit = (typeof def.unit === "string" && def.unit.length > 0 && typeof value === "number") ? def.unit : "";
+
+    let raw: string;
+    if (typeof value === "boolean") {
+      raw = value ? "1" : "0";
+    } else {
+      raw = String(value);
+    }
+    // Strip characters that could break out of the style element or declaration.
+    const sanitized = raw.replace(/[<>;{}]|\/\*/g, "");
+    decls.push(`${cssVar}: ${sanitized}${unit};`);
   }
-  const payload = {
-    capabilities: bundle.capabilities,
-    ...(Object.keys(tweaks).length > 0 ? { tweaks } : {}),
-    ...(bundle.inspect && bundle.inspect.length > 0 ? { inspect: bundle.inspect } : {}),
-  };
-  // Escape "<" so the JSON can never break out of the <script> element (</script>, <!--).
-  const json = JSON.stringify(payload).replace(/</g, "\\u003c");
-  const sdkUrl = `${config.publicBaseUrl}/sdk/see-inspect.js`;
-  return `<script>window.__SEE_BUNDLE__=${json};</script><script src="${sdkUrl}"></script>`;
+
+  if (decls.length === 0) {
+    return "";
+  }
+  return `<style>:root{ ${decls.join(" ")} }</style>`;
 }
 
-// Inject the snippet into served HTML using HTMLRewriter (safe on malformed markup).
-// Prefers <head>; falls back to the start of <body>, then to prepending the document.
-async function injectBundleSdk(html: string, snippet: string): Promise<string> {
+// Inject a style string into served HTML using HTMLRewriter (safe on malformed markup).
+// Prefers appending to <head>; falls back to prepending to <body>, then to prepending the document.
+async function injectBundleStyle(html: string, style: string): Promise<string> {
   let injected = false;
   const headPass = new HTMLRewriter()
     .on("head", {
       element(el) {
-        el.append(snippet, { html: true });
+        el.append(style, { html: true });
         injected = true;
       },
     })
@@ -1361,13 +1370,13 @@ async function injectBundleSdk(html: string, snippet: string): Promise<string> {
   const bodyPass = new HTMLRewriter()
     .on("body", {
       element(el) {
-        el.prepend(snippet, { html: true });
+        el.prepend(style, { html: true });
         injected = true;
       },
     })
     .transform(new Response(out));
   out = await bodyPass.text();
-  return injected ? out : snippet + out;
+  return injected ? out : style + out;
 }
 
 function resourceListPayload(config: AppConfig, upload: UploadRecord, resources: ResourceInfo[]) {

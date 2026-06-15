@@ -1,23 +1,27 @@
 import { AppError } from "./types";
-import type { BundleState, InspectTarget, TweakDef, WorkspaceSettings } from "./upload-metadata";
+import type { BundleState, TweakDef, WorkspaceSettings } from "./upload-metadata";
 
 // The root manifest filename that turns an upload into a first-class bundle.
 export const MANIFEST_FILENAME = "see.json";
 
-const ALLOWED_CAPABILITIES = ["inspect", "tweaks"];
 const ALLOWED_TWEAK_KINDS = ["toggle", "number", "color", "text", "select"];
 
 // Mirror the tweak limits enforced by the Settings API in src/app.ts.
 const MAX_TWEAKS = 100;
 const MAX_TWEAK_KEY_LENGTH = 64;
 const MAX_TWEAK_STRING_VALUE_LENGTH = 2048;
-const MAX_INSPECT_TARGETS = 200;
 const MAX_EXPOSED_PAGES = 1000;
+const MAX_TWEAK_PAGES = 1000;
+const MAX_PAGE_PATH_LENGTH = 1024;
 
 type TweakValue = string | number | boolean;
 
 // A single tweak in the manifest: control metadata plus its current value.
 type ManifestTweak = TweakDef & { value: TweakValue };
+
+// A per-page tweak: control metadata plus an OPTIONAL value (inherits the shared value
+// when omitted). Authors may override just the value, just the control metadata, or both.
+type PartialManifestTweak = TweakDef & { value?: TweakValue };
 
 // The authoring shape of see.json. This is the single source of truth for everything
 // the platform offers; deriveBundleState() projects it onto the server-side workspace
@@ -26,9 +30,8 @@ export type BundleManifest = {
   homepage?: string;
   exposed?: string[];
   bar?: boolean;
-  capabilities: string[];
   tweaks?: Record<string, ManifestTweak>;
-  inspect?: InspectTarget[];
+  pages?: Record<string, { tweaks?: Record<string, PartialManifestTweak> }>;
 };
 
 function invalid(message: string): never {
@@ -50,7 +53,7 @@ export function parseManifest(text: string): BundleManifest {
   }
   const obj = raw as Record<string, unknown>;
 
-  const manifest: BundleManifest = { capabilities: [] };
+  const manifest: BundleManifest = {};
 
   if ("homepage" in obj && obj["homepage"] !== null) {
     if (typeof obj["homepage"] !== "string") {
@@ -77,28 +80,64 @@ export function parseManifest(text: string): BundleManifest {
     manifest.bar = obj["bar"];
   }
 
-  if ("capabilities" in obj && obj["capabilities"] !== null) {
-    const caps = obj["capabilities"];
-    if (!Array.isArray(caps) || !caps.every((c) => typeof c === "string")) {
-      invalid("capabilities must be an array of strings");
-    }
-    for (const cap of caps as string[]) {
-      if (!ALLOWED_CAPABILITIES.includes(cap)) {
-        invalid(`unknown capability "${cap}" (allowed: ${ALLOWED_CAPABILITIES.join(", ")})`);
-      }
-    }
-    manifest.capabilities = [...new Set(caps as string[])];
-  }
-
   if ("tweaks" in obj && obj["tweaks"] !== null) {
     manifest.tweaks = parseTweaks(obj["tweaks"]);
   }
 
-  if ("inspect" in obj && obj["inspect"] !== null) {
-    manifest.inspect = parseInspect(obj["inspect"]);
+  if ("pages" in obj && obj["pages"] !== null) {
+    manifest.pages = parsePages(obj["pages"]);
   }
 
   return manifest;
+}
+
+function parsePages(raw: unknown): Record<string, { tweaks?: Record<string, PartialManifestTweak> }> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    invalid("pages must be an object keyed by page path");
+  }
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if (entries.length > MAX_TWEAK_PAGES) {
+    invalid(`pages supports at most ${MAX_TWEAK_PAGES} entries`);
+  }
+
+  const out: Record<string, { tweaks?: Record<string, PartialManifestTweak> }> = {};
+  for (const [page, value] of entries) {
+    if (page.length > MAX_PAGE_PATH_LENGTH) {
+      invalid(`pages key "${page}" exceeds ${MAX_PAGE_PATH_LENGTH} characters`);
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      invalid(`pages entry "${page}" must be an object`);
+    }
+    const pageObj = value as Record<string, unknown>;
+    const cfg: { tweaks?: Record<string, PartialManifestTweak> } = {};
+    if ("tweaks" in pageObj && pageObj["tweaks"] !== null) {
+      cfg.tweaks = parsePartialTweaks(pageObj["tweaks"]);
+    }
+    out[page] = cfg;
+  }
+  return out;
+}
+
+function parsePartialTweaks(raw: unknown): Record<string, PartialManifestTweak> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    invalid("tweaks must be an object keyed by tweak name");
+  }
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if (entries.length > MAX_TWEAKS) {
+    invalid(`tweaks supports at most ${MAX_TWEAKS} keys`);
+  }
+
+  const out: Record<string, PartialManifestTweak> = {};
+  for (const [key, value] of entries) {
+    if (key.length > MAX_TWEAK_KEY_LENGTH) {
+      invalid(`tweaks key "${key}" exceeds ${MAX_TWEAK_KEY_LENGTH} characters`);
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      invalid(`tweak "${key}" must be an object`);
+    }
+    out[key] = parsePartialTweak(key, value as Record<string, unknown>);
+  }
+  return out;
 }
 
 function parseTweaks(raw: unknown): Record<string, ManifestTweak> {
@@ -169,42 +208,66 @@ function parseTweak(key: string, raw: Record<string, unknown>): ManifestTweak {
   return tweak;
 }
 
-function parseInspect(raw: unknown): InspectTarget[] {
-  if (!Array.isArray(raw)) {
-    invalid("inspect must be an array of { selector, id?, label? } objects");
+// Like parseTweak, but "value" is OPTIONAL — a per-page tweak may override just the value,
+// just the control metadata, or both, inheriting the rest from the shared tweak set.
+function parsePartialTweak(key: string, raw: Record<string, unknown>): PartialManifestTweak {
+  const tweak: PartialManifestTweak = {};
+
+  if ("value" in raw && raw["value"] !== undefined) {
+    const value = raw["value"];
+    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+      invalid(`tweak "${key}" value must be a string, number, or boolean`);
+    }
+    if (typeof value === "string" && value.length > MAX_TWEAK_STRING_VALUE_LENGTH) {
+      invalid(`tweak "${key}" value exceeds ${MAX_TWEAK_STRING_VALUE_LENGTH} characters`);
+    }
+    tweak.value = value;
   }
-  if (raw.length > MAX_INSPECT_TARGETS) {
-    invalid(`inspect supports at most ${MAX_INSPECT_TARGETS} targets`);
+
+  if ("kind" in raw && raw["kind"] !== undefined) {
+    if (typeof raw["kind"] !== "string" || !ALLOWED_TWEAK_KINDS.includes(raw["kind"])) {
+      invalid(`tweak "${key}" kind must be one of: ${ALLOWED_TWEAK_KINDS.join(", ")}`);
+    }
+    tweak.kind = raw["kind"];
   }
-  return raw.map((entry, index) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      invalid(`inspect[${index}] must be an object`);
+  for (const field of ["label", "group", "unit", "cssVar"] as const) {
+    if (field in raw && raw[field] !== undefined) {
+      if (typeof raw[field] !== "string") {
+        invalid(`tweak "${key}" ${field} must be a string`);
+      }
+      tweak[field] = raw[field] as string;
     }
-    const e = entry as Record<string, unknown>;
-    if (typeof e["selector"] !== "string" || e["selector"].length === 0) {
-      invalid(`inspect[${index}] requires a non-empty "selector" string`);
+  }
+  for (const field of ["min", "max", "step"] as const) {
+    if (field in raw && raw[field] !== undefined) {
+      if (typeof raw[field] !== "number" || !Number.isFinite(raw[field])) {
+        invalid(`tweak "${key}" ${field} must be a finite number`);
+      }
+      tweak[field] = raw[field] as number;
     }
-    const target: InspectTarget = { selector: e["selector"] };
-    if ("id" in e && e["id"] !== undefined) {
-      if (typeof e["id"] !== "string") invalid(`inspect[${index}].id must be a string`);
-      target.id = e["id"];
+  }
+  if ("options" in raw && raw["options"] !== undefined) {
+    if (!Array.isArray(raw["options"]) || !raw["options"].every((o) => typeof o === "string")) {
+      invalid(`tweak "${key}" options must be an array of strings`);
     }
-    if ("label" in e && e["label"] !== undefined) {
-      if (typeof e["label"] !== "string") invalid(`inspect[${index}].label must be a string`);
-      target.label = e["label"];
-    }
-    return target;
-  });
+    tweak.options = raw["options"] as string[];
+  }
+
+  if (tweak.value === undefined && Object.keys(tweak).length === 0) {
+    invalid(`tweak "${key}" must define at least a value or one control field`);
+  }
+
+  return tweak;
 }
 
 // Project a validated manifest onto the server-side state: the existing WorkspaceSettings
 // (unchanged shape — tweaks become a name→value map) plus a separate BundleState carrying
-// the extras the SDK injector forwards (capabilities, tweak control defs, inspect targets).
+// tweak control definitions for the static style injector.
 export function deriveBundleState(
   manifest: BundleManifest,
   htmlPages: string[],
   opts: { strict?: boolean } = {},
-): { workspace: WorkspaceSettings; bundle: BundleState } {
+): { workspace: WorkspaceSettings; bundle?: BundleState } {
   // strict (upload / explicit validation): a homepage or exposed entry that does not
   // resolve to a real HTML page is a hard error. Non-strict (live re-derive after an
   // edit): silently drop stale references so a rename never wedges the share.
@@ -241,9 +304,6 @@ export function deriveBundleState(
       tweakValues[key] = value;
       if (Object.keys(def).length > 0) {
         tweakDefs[key] = def;
-      } else {
-        // Keep an (empty) def so the SDK still renders a control for this tweak.
-        tweakDefs[key] = {};
       }
     }
   }
@@ -251,13 +311,52 @@ export function deriveBundleState(
     workspace.tweaks = tweakValues;
   }
 
-  const bundle: BundleState = { capabilities: manifest.capabilities };
+  const bundle: BundleState = {};
   if (Object.keys(tweakDefs).length > 0) {
     bundle.tweakDefs = tweakDefs;
   }
-  if (manifest.inspect && manifest.inspect.length > 0) {
-    bundle.inspect = manifest.inspect;
+
+  // Per-page tweaks inherit from the shared set: each page contributes value overrides
+  // (pageTweaks) and/or control metadata overrides (pageTweakDefs). Page paths must
+  // resolve to a real HTML page — strict errors, non-strict drops stale references
+  // (mirrors the exposed handling above).
+  const pageTweaks: Record<string, Record<string, TweakValue>> = {};
+  const pageTweakDefs: Record<string, Record<string, TweakDef>> = {};
+  if (manifest.pages) {
+    for (const [pagePath, pageCfg] of Object.entries(manifest.pages)) {
+      if (!htmlPages.includes(pagePath)) {
+        if (strict) {
+          invalid(`pages entry "${pagePath}" must be an existing HTML page`);
+        }
+        continue;
+      }
+      if (!pageCfg.tweaks) {
+        continue;
+      }
+      const values: Record<string, TweakValue> = {};
+      const defs: Record<string, TweakDef> = {};
+      for (const [id, { value, ...def }] of Object.entries(pageCfg.tweaks)) {
+        if (value !== undefined) {
+          values[id] = value;
+        }
+        if (Object.keys(def).length > 0) {
+          defs[id] = def;
+        }
+      }
+      if (Object.keys(values).length > 0) {
+        pageTweaks[pagePath] = values;
+      }
+      if (Object.keys(defs).length > 0) {
+        pageTweakDefs[pagePath] = defs;
+      }
+    }
+  }
+  if (Object.keys(pageTweaks).length > 0) {
+    workspace.pageTweaks = pageTweaks;
+  }
+  if (Object.keys(pageTweakDefs).length > 0) {
+    bundle.pageTweakDefs = pageTweakDefs;
   }
 
-  return { workspace, bundle };
+  return { workspace, bundle: Object.keys(bundle).length > 0 ? bundle : undefined };
 }

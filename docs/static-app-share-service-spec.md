@@ -506,21 +506,68 @@ The viewer iframe must:
 
 Parent viewer must not:
 
-- Inject scripts into uploaded content in MVP, **except** the first-party `see` SDK for
-  bundles (see below).
+- Inject scripts into uploaded content.
 - Trust messages from the iframe unless an explicit postMessage protocol is added.
 - Expose admin or upload credentials to the iframe.
 
-Bundle injection exception (post-MVP):
+Bundle injection exception:
 
-- A **bundle** is an upload containing a root `see.json` manifest. When a bundle opts into
-  capabilities, the content handler injects exactly two tags into served HTML: an inline
-  `window.__SEE_BUNDLE__` config blob and the first-party `/sdk/see-inspect.js` script.
-- This is scoped and deliberate: only the platform's own SDK is injected, only for
-  opted-in bundles, only into HTML documents, and only into content that is already
-  sandboxed without `allow-same-origin`. The SDK communicates solely via `postMessage`
-  and cannot script the parent. Uploaded scripts are never modified.
+- A **bundle** is an upload containing a root `see.json` manifest. When a bundle declares
+  tweaks with `cssVar` fields, the content handler injects exactly one thing into served
+  HTML: a single static `<style>` block of `:root` CSS custom properties derived from the
+  bundle's tweak values (e.g. `<style>:root { --color-primary: #D97757; --font-size-base: 16px; }</style>`).
+- No script is injected. Nothing executable is read or derived from the upload. Uploaded
+  scripts are never modified.
+- Injection only happens for bundles that declare cssVar tweaks, only into HTML documents,
+  and only into content that is already sandboxed without `allow-same-origin`.
 - The `see.json` manifest schema for agents is documented in `/llms.txt`.
+
+#### Per-page tweak inheritance
+
+The root `tweaks` map holds **shared** tweak defaults inherited by every page. A bundle may
+additionally declare a top-level optional `pages` map of per-page overrides:
+
+```json
+"pages": {
+  "<page-path>": {
+    "tweaks": {
+      "<id>": { /* PartialTweak */ }
+    }
+  }
+}
+```
+
+- Each `pages` key is a page resource path, in the same form as `homepage`/`exposed`
+  (e.g. `"index.html"`, `"pricing.html"`).
+- A `PartialTweak` has the same shape as a shared tweak except **`value` is optional**:
+  `{ kind?, value?, cssVar?, unit?, label?, group?, min?, max?, step?, options? }`. An entry
+  may override just the value (inheriting `cssVar` and control metadata from the shared tweak
+  of the same id), define a brand-new page-only knob (supplying its own `cssVar`), or override
+  only metadata.
+
+**Resolution (page layer over shared).** When serving a page, each tweak id is resolved by a
+**per-field merge** of the shared and page definitions:
+
+- The effective definition is `{ ...shared, ...page }` (page fields win field-by-field).
+- The effective value is the page `value` when set, otherwise the shared `value`.
+- A page override of `value` alone therefore keeps the shared `cssVar` and metadata.
+
+The resolved set is emitted as the same single static `<style>:root{ … }</style>` block per
+served page — no script, no per-page page JavaScript.
+
+**Validation.** Each `pages` key must be an existing HTML page (validated on upload/replace
+and on patch, the same rule as `exposed`). Each resolved tweak is subject to the same caps as
+shared tweaks (id count, label/value lengths, etc.). The number of `pages` entries is bounded
+by a `MAX_PAGE_TWEAKS` cap. An invalid `pages` map is rejected loudly (`422 invalid_manifest`
+on patch, `400` on upload/replace) and nothing is written.
+
+**Ownership.** Per-page tweaks are manifest-owned, like the other bundle fields. The workspace
+Settings endpoint (`PATCH …/settings`) never sets them; the `bundle_managed` guard that rejects
+`homepage`/`exposed`/`bar`/`tweaks` for bundles also includes `pageTweaks`. Authors edit a
+shared tweak value via JSON pointer `/tweaks/<id>/value` and a page's own tweak value via
+`/pages/<page-path>/tweaks/<id>/value`; these are separate surfaces and never affect each other.
+Per RFC 6901, a `/` inside a page path is escaped as `~1`
+(e.g. `sub/page.html` → `/pages/sub~1page.html/tweaks/<id>/value`).
 
 ### HTTP Headers
 
