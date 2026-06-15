@@ -32,6 +32,7 @@ done
 SEED="$(curl -fsS -X POST "http://localhost:$PORT/api/uploads" \
   -F "file=@$FIXTURE/index.html;filename=index.html" \
   -F "file=@$FIXTURE/pricing.html;filename=pricing.html" \
+  -F "file=@$FIXTURE/theme.css;filename=theme.css" \
   -F "file=@$FIXTURE/see.json;filename=see.json" \
   -F "editToken=evalpw")"
 
