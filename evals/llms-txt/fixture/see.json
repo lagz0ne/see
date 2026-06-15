@@ -1,0 +1,9 @@
+{
+  "homepage": "index.html",
+  "exposed": ["index.html", "pricing.html"],
+  "bar": true,
+  "tweaks": {
+    "primaryColor": { "kind": "color", "value": "#D97757", "cssVar": "--color-primary", "label": "Primary", "group": "Theme" },
+    "fontSize": { "kind": "number", "value": 16, "min": 12, "max": 24, "step": 1, "unit": "px", "cssVar": "--font-size-base", "label": "Font size" }
+  }
+}
