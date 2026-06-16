@@ -15,6 +15,7 @@ import {
   RotateCwIcon,
   Settings2Icon,
   SettingsIcon,
+  SlidersHorizontalIcon,
   SunIcon,
   Trash2Icon,
   UploadCloudIcon,
@@ -67,6 +68,7 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { SettingsPanel } from "./settings/SettingsPanel";
+import { TweaksOverlay, useTweakBridge } from "./settings/TweaksOverlay";
 
 type StaticShareAppProps = {
   root: HTMLElement;
@@ -516,6 +518,20 @@ type UploadSettings = {
   htmlPages: string[];
 };
 
+// Derive the resource page the iframe is actually showing from the path the content runtime reports
+// (the viewer can't read the cross-origin iframe location). Strips the content-root path prefix and
+// decodes; null when it can't be determined (caller falls back to the viewer's page selector).
+function resourcePageFromPath(runtimePath: string | null, contentRoot: string): string | null {
+  if (!runtimePath) return null;
+  try {
+    const prefix = new URL(contentRoot, window.location.href).pathname;
+    if (!runtimePath.startsWith(prefix)) return null;
+    return decodeURIComponent(runtimePath.slice(prefix.length));
+  } catch {
+    return null;
+  }
+}
+
 function ViewerApp({ root }: StaticShareAppProps) {
   const uploadId = root.dataset.uploadId || "";
   const viewerUrl = root.dataset.viewerUrl || window.location.href;
@@ -552,7 +568,9 @@ function ViewerApp({ root }: StaticShareAppProps) {
   // Settings state fetched on mount
   const [uploadSettings, setUploadSettings] = useState<UploadSettings | null>(null);
   const [currentPage, setCurrentPage] = useState<string | null>(null);
+  const [tweaksOpen, setTweaksOpen] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const tweakBridge = useTweakBridge(uploadId, iframeRef);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
@@ -961,6 +979,15 @@ function ViewerApp({ root }: StaticShareAppProps) {
                 />
               </PopoverContent>
             </Popover>
+            <TooltipButton
+              label="Tweaks"
+              variant={tweaksOpen ? "default" : "outline"}
+              size="icon-sm"
+              aria-pressed={tweaksOpen}
+              onClick={() => setTweaksOpen((value) => !value)}
+            >
+              <SlidersHorizontalIcon data-icon="inline-start" />
+            </TooltipButton>
             <TooltipButton label={copied ? "Copied" : "Copy link"} variant="outline" size="icon-sm" onClick={copyViewer}>
               <CopyIcon data-icon="inline-start" />
             </TooltipButton>
@@ -1054,6 +1081,15 @@ function ViewerApp({ root }: StaticShareAppProps) {
         </div>
       </section>
 
+      {tweaksOpen && controlsVisible ? (
+        <TweaksOverlay
+          uploadId={uploadId}
+          page={resourcePageFromPath(tweakBridge.runtimePath, contentRoot) ?? currentPage}
+          revision={resourceRevision}
+          bridge={tweakBridge}
+          onClose={() => setTweaksOpen(false)}
+        />
+      ) : null}
     </main>
   );
 }

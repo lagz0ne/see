@@ -20,6 +20,8 @@ describe("content runtime", () => {
     expect(script).toContain('"origin":"https://view.example"');
     expect(script).toContain("new MessageChannel()");
     expect(script).toContain("cfg.origin, [channel.port2]");
+    // It reports its own page so the viewer can track in-iframe navigation across the opaque origin.
+    expect(script).toContain("location.pathname");
     expect(script).not.toContain('"*"');
     // Tweak traffic flows over the port, so there is no window 'message' listener to attack.
     expect(script).not.toContain('addEventListener("message"');

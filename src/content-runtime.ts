@@ -25,7 +25,7 @@ export type ContentRuntimeConfig = {
 // into the content ETag for injected bundle HTML (see app.ts contentEtag), so bumping it invalidates
 // pages cached before the change instead of letting them 304 to a stale body. (Viewer-origin changes
 // are handled automatically: the injected ETag also hashes the viewer origin baked into the runtime.)
-export const CONTENT_RUNTIME_VERSION = 1;
+export const CONTENT_RUNTIME_VERSION = 2;
 
 // The runtime body as an inline-evaluated function expression. Dependency-free and ES5-ish so it
 // runs inside any uploaded app with no build step. `cfg` is supplied by the IIFE call below.
@@ -59,7 +59,9 @@ const RUNTIME_BODY = `function (cfg) {
 
   // Concrete targetOrigin (the viewer) — never a wildcard. Only our viewer is at that origin, so a
   // third-party embedder never receives this. The transferred port is the secure command channel.
-  try { window.parent.postMessage({ type: "see:hello", id: cfg.id }, cfg.origin, [channel.port2]); } catch (e) {}
+  // The path lets the viewer track in-iframe navigation (it can't read this cross-origin location):
+  // each navigation reloads the runtime, which re-announces with the new path.
+  try { window.parent.postMessage({ type: "see:hello", id: cfg.id, path: location.pathname }, cfg.origin, [channel.port2]); } catch (e) {}
 }`;
 
 // Build the inline <script> that boots the runtime with `config`. The config is serialized as JSON

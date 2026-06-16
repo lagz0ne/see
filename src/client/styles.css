@@ -7,6 +7,16 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* radix-nova components address radix state/orientation through short data-variants; map them to the
+   attributes radix actually emits (data-state / data-orientation). Without these the checked,
+   open/closed and slider-orientation styles never apply (e.g. a Switch never moves its thumb). */
+@custom-variant data-checked (&[data-state="checked"]);
+@custom-variant data-unchecked (&[data-state="unchecked"]);
+@custom-variant data-open (&[data-state="open"]);
+@custom-variant data-closed (&[data-state="closed"]);
+@custom-variant data-horizontal (&[data-orientation="horizontal"]);
+@custom-variant data-vertical (&[data-orientation="vertical"]);
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);

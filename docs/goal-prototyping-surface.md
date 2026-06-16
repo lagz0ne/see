@@ -68,7 +68,12 @@ runtime anyway). The canonical share still serves the user's own content — we 
    child *initiates* the handshake to the viewer's **concrete** origin and transfers a `MessagePort`;
    all further traffic is point-to-point over the port (no `targetOrigin`, never a wildcard). The
    viewer identifies its child by `event.source` (the opaque origin can't be matched). No window
-   `message` handler trusts an arbitrary sender.
+   `message` handler trusts an arbitrary sender. **Accepted limitation (arbitrated 2026-06-16):**
+   uploaded JS shares the iframe's opaque origin and knows the public share id, so the handshake is
+   spoofable and *cannot* be made unspoofable (any nonce the runtime can read, same-document page
+   code can read too). This is acceptable because the bridge is one-way (viewer → content) and
+   carries only cosmetic cssVar overrides the content already sees applied to its own `:root` — no
+   viewer-private data crosses it, and the viewer never acts on inbound port messages.
 4. Near-zero-dep Bun project — no new runtime deps without a strong reason.
 5. UI consumes **Blueprint tokens by name** (`design.md`) — no raw OKLCH/hex; hairlines over
    shadows; mono voice for machine data; viewer chrome stays subtle.
