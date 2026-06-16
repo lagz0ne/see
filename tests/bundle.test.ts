@@ -457,6 +457,84 @@ describe("bundles", () => {
     expect(meta.kind).toBe("html");
   });
 
+  test("replacing see.json via a non-canonical path still strict-validates the manifest", async () => {
+    const { app } = await testApp();
+    // A plain single-HTML share — kind "html", not a bundle.
+    const payload = await (await uploadFiles(app, [indexFile()], { editToken: "pw" })).json();
+    expect(payload.kind).toBe("html");
+
+    // Each vector encodes a path the writer canonicalizes to root "see.json": leading "./",
+    // trailing "/", and surrounding whitespace. A malformed body through ANY of them must be
+    // rejected by the strict-validation guard — not silently written into a broken bundle.
+    const vectors = [".%2Fsee.json", "see.json%2F", "%20see.json%20"];
+    for (const vector of vectors) {
+      const res = await app.fetch(
+        new Request(`http://share.test/api/uploads/${payload.id}/resources/${vector}`, {
+          method: "PUT",
+          headers: { authorization: "Bearer pw", "content-type": "application/json" },
+          body: "{ not valid json",
+        }),
+      );
+      expect([400, 422]).toContain(res.status);
+      expect((await res.json()).code).toBe("invalid_manifest");
+
+      // The share stays a plain html share — never half-upgraded to a broken bundle.
+      const meta = await (await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}`))).json();
+      expect(meta.kind).toBe("html");
+    }
+  });
+
+  test("a batch patch targeting see.json via a non-canonical path still strict-validates", async () => {
+    const { app } = await testApp();
+    const payload = await (await uploadFiles(app, [indexFile(), manifestFile(manifest())], { editToken: "pw" })).json();
+    expect(payload.kind).toBe("bundle");
+
+    // Patch the manifest through a non-canonical alias ("./see.json") with a value that makes the
+    // manifest invalid (homepage at a non-existent page). The guard must canonicalize the op's
+    // file to root see.json and reject loudly — not persist an invalid manifest.
+    const res = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/patch`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer pw" },
+        body: JSON.stringify({
+          ops: [{ file: "./see.json", pointer: "/homepage", action: "set", value: "missing.html" }],
+        }),
+      }),
+    );
+    expect(res.status).toBe(422);
+    expect((await res.json()).code).toBe("invalid_manifest");
+
+    // The manifest was not mutated — the share still injects its original tweak.
+    const style = rootStyle(
+      await (await app.fetch(new Request(`http://share.test/content/${payload.id}/`))).text(),
+    );
+    expect(style).toContain("--color-primary: #D97757");
+  });
+
+  test("adding see.json via multipart with a whitespace path still strict-validates the manifest", async () => {
+    const { app } = await testApp();
+    const payload = await (await uploadFiles(app, [indexFile()], { editToken: "pw" })).json();
+    expect(payload.kind).toBe("html");
+
+    // path " see.json " is trimmed to root see.json by the writer; the multipart guard must
+    // canonicalize the same way and reject the malformed manifest rather than upgrade the share.
+    const formData = new FormData();
+    formData.append("file", new File(["{ not valid json"], "x.json", { type: "application/json" }));
+    formData.set("path", " see.json ");
+    const res = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/resources`, {
+        method: "POST",
+        headers: { authorization: "Bearer pw" },
+        body: formData,
+      }),
+    );
+    expect([400, 422]).toContain(res.status);
+    expect((await res.json()).code).toBe("invalid_manifest");
+
+    const meta = await (await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}`))).json();
+    expect(meta.kind).toBe("html");
+  });
+
   test("deleting a bundle's see.json downgrades it to a resources share and stops injecting", async () => {
     const { app } = await testApp();
     const payload = await (await uploadFiles(app, [indexFile(), manifestFile(manifest())], { editToken: "pw" })).json();
@@ -480,6 +558,54 @@ describe("bundles", () => {
     const after = await (await app.fetch(new Request(`http://share.test/content/${payload.id}/`))).text();
     // Injection stops once the manifest is gone (the raw fixture :root has no space).
     expect(rootStyle(after)).toBe("");
+  });
+
+  test("a bundle injects the see:* runtime (port handshake to the viewer origin); a plain share does not", async () => {
+    const { app } = await testApp();
+    const bundle = await (await uploadFiles(app, [indexFile(), manifestFile(manifest())], { editToken: "pw" })).json();
+    expect(bundle.kind).toBe("bundle");
+
+    const html = await (await app.fetch(new Request(`http://share.test/content/${bundle.id}/`))).text();
+    // Runtime present: initiates a port handshake to the concrete viewer origin (no "*", no
+    // sandbox-denied localStorage).
+    expect(html).toContain("see:hello");
+    expect(html).toContain("new MessageChannel()");
+    expect(html).toContain('"origin":"http://share.test"');
+    expect(html).toContain(`"id":"${bundle.id}"`);
+    expect(html).not.toContain("localStorage");
+    expect(html).not.toContain('"*"');
+    // ...and the static tweak <style> is still injected alongside it.
+    expect(rootStyle(html)).toContain("--color-primary: #D97757");
+
+    // A plain (non-bundle) share is served untouched — no runtime.
+    const plain = await (await uploadFiles(app, [indexFile()], { editToken: "pw" })).json();
+    expect(plain.kind).toBe("html");
+    const plainHtml = await (await app.fetch(new Request(`http://share.test/content/${plain.id}/`))).text();
+    expect(plainHtml).not.toContain("see:hello");
+    expect(plainHtml).not.toContain("MessageChannel");
+  });
+
+  test("bundle HTML carries a runtime-versioned ETag so a pre-runtime cache cannot stale-304", async () => {
+    const { app } = await testApp();
+    const bundle = await (await uploadFiles(app, [indexFile(), manifestFile(manifest())], { editToken: "pw" })).json();
+
+    const res = await app.fetch(new Request(`http://share.test/content/${bundle.id}/`));
+    const etag = res.headers.get("ETag") ?? "";
+    expect(etag).toMatch(/-r\d+\.[a-z0-9]+"$/); // runtime version + viewer-origin hash in the validator
+
+    // A validator from before the runtime existed (same revision, no runtime tag) must NOT 304 — it
+    // should re-fetch the freshly injected body rather than keep the pre-injection HTML.
+    const stale = etag.replace(/-r\d+\.[a-z0-9]+"$/, '"');
+    const revalidate = await app.fetch(
+      new Request(`http://share.test/content/${bundle.id}/`, { headers: { "if-none-match": stale } }),
+    );
+    expect(revalidate.status).toBe(200);
+    expect(await revalidate.text()).toContain("see:hello");
+
+    // A plain (non-injected) share keeps the plain validator — no runtime/origin tag.
+    const plain = await (await uploadFiles(app, [indexFile()], { editToken: "pw" })).json();
+    const plainRes = await app.fetch(new Request(`http://share.test/content/${plain.id}/`));
+    expect(plainRes.headers.get("ETag") ?? "").not.toMatch(/-r\d+\./);
   });
 
   test("a create-path multipart upload of index.html + see.json yields kind bundle", async () => {

@@ -9,6 +9,7 @@ dist/
 .claude/
 .tmp/
 tmp/
+.codex-review/
 
 # Local runtime data
 *.db

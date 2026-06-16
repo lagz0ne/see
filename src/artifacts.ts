@@ -117,6 +117,11 @@ export function decodeResourcePathFromUrl(value: string): string {
   }
 }
 
+// Canonicalize a stored resource path. Intentionally does NOT trim surrounding whitespace, so it
+// stays aligned with the archive normalizer (zip.ts `normalizeArchivePath`): a whitespace-named
+// zip resource is stored verbatim and must remain addressable for read/edit/delete. The resource
+// WRITE path additionally trims (see `inputWritePath` / `resourceWritePath`) — guards that
+// validate a write must canonicalize through those, not this, to match what the writer stores.
 export function normalizeResourcePath(rawName: string, maxPathDepth: number): string {
   const name = rawName.replaceAll("\\", "/");
   if (name.includes("\0")) {
@@ -144,6 +149,22 @@ export function normalizeResourcePath(rawName: string, maxPathDepth: number): st
     throw new AppError(400, "resource_path_too_deep", `Resource path exceeds ${maxPathDepth} segments`);
   }
   return parts.join("/");
+}
+
+// The exact stored path the resource writer (`writeResourceFilesToRoot`) produces for a
+// client-supplied path string: trim THEN normalize. Guards that validate a write — most notably
+// the strict see.json manifest check — MUST address the path through this, because a guard that
+// canonicalizes differently from the writer is precisely how malformed-manifest bypasses recur
+// (`./see.json`, `see.json/`, `"%20see.json%20"`).
+export function resourceWritePath(rawPath: string, maxPathDepth: number): string {
+  return normalizeResourcePath(rawPath.trim(), maxPathDepth);
+}
+
+// The stored path the writer produces for a whole write input — the provided path (trimmed) or,
+// when absent, the file's own name. This is the single canonicalization shared by the writer and
+// the multipart see.json guard so the two cannot drift.
+export function inputWritePath(input: ResourceWriteInput, maxPathDepth: number): string {
+  return normalizeResourcePath(input.path?.trim() || browserFilePath(input.file), maxPathDepth);
 }
 
 export function randomEditToken(): string {
@@ -305,7 +326,7 @@ function prepareResourceInputs(
 
   const prepared = inputs.map((input) => ({
     file: input.file,
-    path: normalizeResourcePath(input.path?.trim() || browserFilePath(input.file), config.maxPathDepth),
+    path: inputWritePath(input, config.maxPathDepth),
   }));
 
   if (allowHtmlIndexFallback && !prepared.some((resource) => isIndexPath(resource.path))) {

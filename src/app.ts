@@ -9,7 +9,8 @@ import {
   deleteArtifact,
   deleteResource,
   listResources,
-  normalizeResourcePath,
+  inputWritePath,
+  resourceWritePath,
   randomEditToken,
   renameArtifact,
   sha256Text,
@@ -35,6 +36,7 @@ import {
   type WorkspaceSettings,
 } from "./upload-metadata";
 import { contentFrameSrc, contentOrigin, contentRootUrl, isContentHost, viewerUrl } from "./urls";
+import { contentRuntimeScript, CONTENT_RUNTIME_VERSION } from "./content-runtime";
 import { AppError, type ResourceInfo, type UploadKind, type UploadRecord } from "./types";
 import { eventBus } from "./events";
 
@@ -783,7 +785,17 @@ async function handlePatchBatch(
   // writing (also surfaced on dryRun). Patches can only edit existing files, so the HTML
   // page set is unchanged — validate against the current resource list.
   for (const [file, content] of batch.outputs) {
-    if (decodeResourcePathFromUrl(file) !== MANIFEST_FILENAME) {
+    // Canonicalize to the path the writer will store (trim + normalize), so a patch op whose
+    // `file` is a non-canonical alias of the manifest ("./see.json", "see.json/") cannot skip
+    // strict validation yet still overwrite root see.json — the same bypass the resource
+    // endpoints guard against. Unsafe paths are left for addOrReplaceResources to reject.
+    let writePath: string;
+    try {
+      writePath = resourceWritePath(decodeResourcePathFromUrl(file), config.maxPathDepth);
+    } catch {
+      continue;
+    }
+    if (writePath !== MANIFEST_FILENAME) {
       continue;
     }
     try {
@@ -880,7 +892,7 @@ async function handleResourceRequest(
     }
     const inputs = files.map((file, index) => {
       const path = index === 0 ? requestedPath : null;
-      return { file, path, targetPath: normalizeResourcePath(path ?? file.name, config.maxPathDepth) };
+      return { file, path, targetPath: inputWritePath({ file, path }, config.maxPathDepth) };
     });
     // Adding a see.json turns the share into a bundle: validate the manifest loudly before
     // writing so a share never becomes a broken bundle (mirrors the replace path above).
@@ -909,23 +921,27 @@ async function handleResourceRequest(
   if ((method === "PATCH" || method === "PUT") && resourcePath) {
     rejectOversizedRequest(request, config.maxExtractedFileBytes, "resource_too_large");
     const decodedPath = decodeResourcePathFromUrl(resourcePath);
+    // Canonicalize exactly as the writer stores it (trim + normalize) BEFORE the manifest guard,
+    // so a non-canonical path that resolves to root see.json ("./see.json", "see.json/",
+    // "%20see.json%20") cannot skip strict validation and slip the share into a broken bundle.
+    const targetPath = resourceWritePath(decodedPath, config.maxPathDepth);
     const bytes = new Uint8Array(await request.arrayBuffer());
     if (bytes.byteLength > config.maxExtractedFileBytes) {
       throw new AppError(413, "resource_too_large", `Resource exceeds ${config.maxExtractedFileBytes} bytes`);
     }
     // Replacing a bundle's see.json: validate the new manifest loudly before writing.
-    if (decodedPath === MANIFEST_FILENAME) {
+    if (targetPath === MANIFEST_FILENAME) {
       const manifest = parseManifest(new TextDecoder().decode(bytes));
       deriveBundleState(manifest, htmlPagesOf(await listResources(config, upload.storagePath)), { strict: true });
     }
-    const file = new File([bytes], decodedPath.split("/").pop() || "resource", {
+    const file = new File([bytes], targetPath.split("/").pop() || "resource", {
       type: request.headers.get("content-type") || "",
     });
-    const summary = await addOrReplaceResources(config, upload.storagePath, [{ file, path: decodedPath }]);
+    const summary = await addOrReplaceResources(config, upload.storagePath, [{ file, path: targetPath }]);
     const payload = await persistResourceMutation(repo, config, upload, summary);
     logEvent("info", "resource_patch_success", {
       id: upload.id,
-      path: decodedPath,
+      path: targetPath,
       bytes: bytes.byteLength,
       revision: payload.revision,
     });
@@ -996,7 +1012,13 @@ async function handleContentRequest(
 
   const info = await stat(filePath);
   const contentType = mimeTypeForPath(filePath);
-  const etag = contentEtag(upload, info.size, info.mtimeMs);
+  // A bundle's HTML is rewritten in <head> with the tweak <style> + the see:* runtime, so its
+  // validator must also depend on the runtime/injection version — otherwise HTML cached before a
+  // runtime change revalidates to a stale 304 and keeps the pre-injection body. Non-injected
+  // responses (plain shares, non-HTML files) keep the plain file/revision validator.
+  const willInject = upload.kind === "bundle" && contentType.startsWith("text/html");
+  const viewerOrigin = new URL(config.publicBaseUrl).origin;
+  const etag = contentEtag(upload, info.size, info.mtimeMs, willInject ? viewerOrigin : null);
   const headers: Record<string, string> = {
     ...contentHeaders(),
     "Content-Type": contentType,
@@ -1010,23 +1032,26 @@ async function handleContentRequest(
     });
   }
 
-  // Bundle wiring: inject static CSS custom properties for tweak values.
-  // Only rewrites HTML when there are cssVar-backed tweaks; falls through otherwise.
-  const bundle = upload.kind === "bundle" ? uploadBundle(upload) : undefined;
-  // Canonical page key = the served file's resource path (root-relative, "/"-joined),
-  // matching how see.json keys pages via `exposed`/`homepage`. Deriving it from the
-  // *resolved* filePath (not assetPath) means a root request ("/") that resolved to the
-  // homepage yields the homepage's resource path (e.g. "index.html") — so a page override
-  // keyed on the homepage applies whether the viewer hits "/" or "/index.html".
-  const pagePath = filePath.startsWith(root + sep)
-    ? filePath.slice(root.length + 1).split(sep).join("/")
-    : "";
-  const style = bundle ? bundleTweakStyle(uploadWorkspace(upload), bundle, pagePath) : "";
-  if (style !== "" && contentType.startsWith("text/html")) {
+  // Bundle wiring: into a bundle's served HTML we inject (1) the static <style> of cssVar tweak
+  // values and (2) the see:* content runtime (the applier half of the bridge). Both go in <head>.
+  // Plain (non-bundle) shares and non-HTML files are served untouched. The content origin sets no
+  // CSP and uploaded apps already run JS under the sandbox, so the runtime ships to every viewer.
+  if (willInject) {
+    // Canonical page key = the served file's resource path (root-relative, "/"-joined), matching how
+    // see.json keys pages via `exposed`/`homepage`. Deriving it from the *resolved* filePath (not
+    // assetPath) means a root request ("/") that resolved to the homepage yields the homepage's
+    // resource path (e.g. "index.html") — so a page override applies whether the viewer hits "/" or
+    // "/index.html".
+    const pagePath = filePath.startsWith(root + sep)
+      ? filePath.slice(root.length + 1).split(sep).join("/")
+      : "";
+    const bundle = uploadBundle(upload);
+    const style = bundle ? bundleTweakStyle(uploadWorkspace(upload), bundle, pagePath) : "";
+    const runtime = contentRuntimeScript({ id: upload.id, viewerOrigin });
     const html = await Bun.file(filePath).text();
-    const injected = await injectBundleStyle(html, style);
-    // Content-Length now reflects the rewritten body; ETag still keys on revision (which
-    // bumps whenever see.json changes), so caches invalidate correctly.
+    const injected = await injectIntoHead(html, style + runtime);
+    // Content-Length reflects the rewritten body; the ETag keys on revision AND the runtime version
+    // (see willInject), so caches invalidate on a see.json change or a runtime change.
     return new Response(injected, { status: 200, headers });
   }
 
@@ -1363,14 +1388,15 @@ function bundleTweakStyle(workspace: WorkspaceSettings, bundle: BundleState, pag
   return `<style>:root{ ${decls.join(" ")} }</style>`;
 }
 
-// Inject a style string into served HTML using HTMLRewriter (safe on malformed markup).
-// Prefers appending to <head>; falls back to prepending to <body>, then to prepending the document.
-async function injectBundleStyle(html: string, style: string): Promise<string> {
+// Inject an HTML fragment (the tweak <style> and/or the see:* content runtime <script>) into served
+// HTML using HTMLRewriter (safe on malformed markup). Prefers appending to <head>; falls back to
+// prepending to <body>, then to prepending the document.
+async function injectIntoHead(html: string, fragment: string): Promise<string> {
   let injected = false;
   const headPass = new HTMLRewriter()
     .on("head", {
       element(el) {
-        el.append(style, { html: true });
+        el.append(fragment, { html: true });
         injected = true;
       },
     })
@@ -1384,13 +1410,13 @@ async function injectBundleStyle(html: string, style: string): Promise<string> {
   const bodyPass = new HTMLRewriter()
     .on("body", {
       element(el) {
-        el.prepend(style, { html: true });
+        el.prepend(fragment, { html: true });
         injected = true;
       },
     })
     .transform(new Response(out));
   out = await bodyPass.text();
-  return injected ? out : style + out;
+  return injected ? out : fragment + out;
 }
 
 function resourceListPayload(config: AppConfig, upload: UploadRecord, resources: ResourceInfo[]) {
@@ -1503,8 +1529,24 @@ function markExpired(upload: UploadRecord, repo: UploadsRepository): void {
   }
 }
 
-function contentEtag(upload: UploadRecord, size: number, mtimeMs: number): string {
-  return `W/"${upload.id}-${uploadRevision(upload)}-${size}-${Math.round(mtimeMs)}"`;
+function contentEtag(upload: UploadRecord, size: number, mtimeMs: number, viewerOrigin: string | null = null): string {
+  // Injected bundle HTML depends on the runtime code AND the viewer origin baked into it (the
+  // handshake target), not just the file/revision. Fold a token over both so cached HTML re-fetches
+  // after a runtime change (CONTENT_RUNTIME_VERSION) OR a PUBLIC_BASE_URL change instead of 304-ing
+  // to a body whose runtime posts see:hello to the wrong origin. Non-injected responses (plain
+  // shares, non-HTML files) keep the plain file/revision validator.
+  const injTag = viewerOrigin ? `-r${CONTENT_RUNTIME_VERSION}.${shortHash(viewerOrigin)}` : "";
+  return `W/"${upload.id}-${uploadRevision(upload)}-${size}-${Math.round(mtimeMs)}${injTag}"`;
+}
+
+// Small non-cryptographic hash (FNV-1a) for cache-key tokens — deterministic, dependency-free.
+function shortHash(value: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    h ^= value.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
 }
 
 function htmlResponse(body: string, status: number, config: AppConfig): Response {

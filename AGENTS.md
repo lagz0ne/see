@@ -74,3 +74,30 @@ Use the shadcn skill for all UI/component work instead of hand-writing markup.
 - Check component docs before adding or composing components.
 - Prefer existing shadcn components over custom control markup.
 - Keep viewer chrome subtle; the uploaded app is the primary UI.
+
+## Code review (Codex)
+
+Claude implements; **Codex reviews** (a different model catches different bugs). Run
+`scripts/codex-review.sh` after every meaningful chunk (no args = working-tree changes;
+`--base main` for a whole branch; `--commit <sha>` for one commit). Reviews are saved under
+`.codex-review/` (gitignored). When reviewing, weight these **load-bearing invariants** (full
+context in `docs/goal-prototyping-surface.md`):
+
+1. **Security (highest).** Uploaded content is untrusted. The viewer iframe sandbox MUST NOT gain
+   `allow-same-origin`; the **viewer-origin CSP MUST NOT be loosened** (the content origin sets no
+   CSP — uploaded apps already run arbitrary JS under the sandbox, so injecting a runtime there is
+   not a new capability). The injected prototype runtime (bridge / tweak-runtime / inspector)
+   ships to all content-origin viewers, so it MUST be minimal, self-contained, and trusted: no
+   `eval`/remote code, no secrets, and every `postMessage` handler MUST verify `event.origin`
+   against the viewer origin (both directions). It MUST degrade silently when its injected config
+   is absent (non-bundle shares) and MUST NOT be drivable by an untrusted origin. Flag any
+   origin-check gap, sandbox/viewer-CSP loosening, or runtime that trusts an arbitrary sender.
+2. **Correctness.** Logic bugs, unhandled errors, races; per-page tweak resolution must be
+   page-over-shared merged per field; localStorage keys must not collide across shares;
+   serve-time include/transclusion must reject missing/cyclic includes and path escapes.
+3. **Design system.** UI consumes Blueprint tokens by name (`design.md`) — no raw OKLCH/hex,
+   hairlines over shadows, mono voice for machine data.
+4. **Scope.** Near-zero-dep Bun project — flag new dependencies or over-engineering.
+
+Output terse, prioritized findings (`[high|med|low] file:line — problem — fix`) and a final
+`VERDICT: SHIP | FIX-FIRST | BLOCK`.
