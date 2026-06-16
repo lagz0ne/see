@@ -33,6 +33,7 @@ import {
   uploadRevision,
   uploadWorkspace,
   type BundleState,
+  type TweakDef,
   type WorkspaceSettings,
 } from "./upload-metadata";
 import { contentFrameSrc, contentOrigin, contentRootUrl, isContentHost, viewerUrl } from "./urls";
@@ -121,6 +122,11 @@ export function createApp(config: AppConfig): StaticShareApp {
           return await handlePatchSettings(request, apiSettingsMatch[1], repo, config);
         }
         return textResponse("Method Not Allowed", 405);
+      }
+
+      const apiTweaksMatch = url.pathname.match(/^\/api\/uploads\/([^/]+)\/tweaks$/);
+      if (method === "GET" && apiTweaksMatch) {
+        return await handleGetTweaks(apiTweaksMatch[1], url.searchParams.get("page"), repo, config);
       }
 
       const apiEventsMatch = url.pathname.match(/^\/api\/uploads\/([^/]+)\/events$/);
@@ -392,6 +398,56 @@ async function handleGetSettings(id: string, repo: UploadsRepository, config: Ap
     tweaks: workspace.tweaks ?? {},
     htmlPages,
   });
+}
+
+// Resolved tweak set for one page — the overlay's data source. Public (like GET /settings): the
+// values are already injected into served HTML, so there is nothing secret here. Returns the
+// effective def+value for each tweak plus which layer (page/shared) supplied the value.
+async function handleGetTweaks(id: string, page: string | null, repo: UploadsRepository, config: AppConfig): Promise<Response> {
+  if (!ID_PATTERN.test(id)) {
+    return jsonResponse({ error: "Upload not found", code: "not_found" }, 404);
+  }
+  const upload = repo.findById(id);
+  if (!upload) {
+    return jsonResponse({ error: "Upload not found", code: "not_found" }, 404);
+  }
+  if (isUploadExpired(upload)) {
+    markExpired(upload, repo);
+    return jsonResponse({ error: "Upload expired", code: "expired" }, 410);
+  }
+
+  // Only bundles carry tweaks; a plain share resolves to an empty set (the overlay shows nothing).
+  if (upload.kind !== "bundle") {
+    return jsonResponse({ id: upload.id, revision: uploadRevision(upload), page: page ?? null, tweaks: [] });
+  }
+
+  const workspace = uploadWorkspace(upload);
+  const bundle = uploadBundle(upload) ?? {};
+  const pagePath = await resolveTweakPageKey(upload, workspace, config, page);
+  const tweaks = resolveBundleTweaks(workspace, bundle, pagePath)
+    .slice()
+    .sort((a, b) => (a.group ?? "").localeCompare(b.group ?? "") || a.id.localeCompare(b.id));
+
+  return jsonResponse({ id: upload.id, revision: uploadRevision(upload), page: pagePath, tweaks });
+}
+
+// The resource path the content route serves for `page` (or the share root when page is empty),
+// resolved via resolveContentFile EXACTLY as handleContentRequest does. Keeps GET /tweaks in lockstep
+// with the injected HTML's pageTweaks key for canonicalized URLs (trailing-slash directories,
+// SPA-fallback client routes) and bundles that omit `homepage`.
+async function resolveTweakPageKey(
+  upload: UploadRecord,
+  workspace: WorkspaceSettings,
+  config: AppConfig,
+  page: string | null,
+): Promise<string> {
+  const root = resolve(config.storageDir, upload.storagePath);
+  // `page` from the query string is ALREADY percent-decoded; re-encode each segment so
+  // resolveServedFile's single decode (in resolveContentFile) round-trips it — and so a resource
+  // path with a literal "%" (e.g. "100%.html") resolves instead of erroring on a double decode.
+  const assetPath = page && page.length > 0 ? page.split("/").map(encodeURIComponent).join("/") : "";
+  const filePath = await resolveServedFile(root, assetPath, workspace.homepage, config.spaFallback);
+  return servedPageKey(root, filePath);
 }
 
 async function handlePatchSettings(request: Request, id: string, repo: UploadsRepository, config: AppConfig): Promise<Response> {
@@ -990,21 +1046,9 @@ async function handleContentRequest(
 
   const root = resolve(config.storageDir, upload.storagePath);
 
-  // For root requests, check workspace.homepage first; fall back to normal index resolution.
-  let filePath: string | null;
-  if (!assetPath) {
-    const homepage = uploadWorkspace(upload).homepage;
-    if (homepage && homepage.length > 0) {
-      filePath = await resolveContentFile(root, homepage, false);
-    } else {
-      filePath = null;
-    }
-    if (!filePath) {
-      filePath = await resolveContentFile(root, assetPath, config.spaFallback);
-    }
-  } else {
-    filePath = await resolveContentFile(root, assetPath, config.spaFallback);
-  }
+  // Resolve the served file the same way GET /tweaks does (resolveServedFile), so the injected
+  // pageTweaks key and the endpoint's never diverge. Root requests prefer homepage, then index.
+  const filePath = await resolveServedFile(root, assetPath, uploadWorkspace(upload).homepage, config.spaFallback);
 
   if (!filePath) {
     return textResponse("Not Found", 404, contentHeaders());
@@ -1042,9 +1086,7 @@ async function handleContentRequest(
     // assetPath) means a root request ("/") that resolved to the homepage yields the homepage's
     // resource path (e.g. "index.html") — so a page override applies whether the viewer hits "/" or
     // "/index.html".
-    const pagePath = filePath.startsWith(root + sep)
-      ? filePath.slice(root.length + 1).split(sep).join("/")
-      : "";
+    const pagePath = servedPageKey(root, filePath);
     const bundle = uploadBundle(upload);
     const style = bundle ? bundleTweakStyle(uploadWorkspace(upload), bundle, pagePath) : "";
     const runtime = contentRuntimeScript({ id: upload.id, viewerOrigin });
@@ -1109,6 +1151,29 @@ async function resolveContentFile(root: string, assetPath: string, spaFallback: 
     return exact;
   }
   return spaFallback ? await indexInside("") : null;
+}
+
+// The file the content route serves for a request, factored so the HTML injector and GET /tweaks
+// resolve a page IDENTICALLY (the source of three prior endpoint/route divergences). `assetPath` is
+// a RAW, still-percent-encoded path segment as it arrives in the URL; resolveContentFile decodes it
+// exactly once. Root requests prefer workspace.homepage, then normal index resolution.
+async function resolveServedFile(
+  root: string,
+  assetPath: string,
+  homepage: string | undefined,
+  spaFallback: boolean,
+): Promise<string | null> {
+  if (assetPath) {
+    return resolveContentFile(root, assetPath, spaFallback);
+  }
+  const fromHomepage = homepage && homepage.length > 0 ? await resolveContentFile(root, homepage, false) : null;
+  return fromHomepage ?? resolveContentFile(root, "", spaFallback);
+}
+
+// The pageTweaks key for a served file = its root-relative resource path ("/"-joined); "" when the
+// file is outside the root or unresolved.
+function servedPageKey(root: string, filePath: string | null): string {
+  return filePath && filePath.startsWith(root + sep) ? filePath.slice(root.length + 1).split(sep).join("/") : "";
 }
 
 function parseContentRoute(config: AppConfig, url: URL): { id: string; assetPath: string } | null {
@@ -1337,19 +1402,22 @@ async function rederiveManifestState(
   }
 }
 
-// Build a static <style> block that injects tweak CSS custom properties into :root.
-// Only tweaks with a non-empty cssVar are emitted. Values are sanitized to prevent
-// breaking out of the style element or declaration.
-function bundleTweakStyle(workspace: WorkspaceSettings, bundle: BundleState, pagePath: string): string {
-  // Resolution = page layer over shared. Shared values/defs come from the workspace +
-  // bundle top-level maps; per-page overrides inherit from them and win field-by-field.
+// Resolve a page's effective tweak set = page layer over shared, merged field-by-field. Shared
+// values/defs come from the workspace + bundle top-level maps; per-page overrides inherit from them
+// and win. Shared by the injected <style> and the GET /tweaks endpoint so the two never diverge.
+type ResolvedTweak = TweakDef & {
+  id: string;
+  value: string | number | boolean | null; // effective value (page ?? shared); null if unset
+  valueSource: "page" | "shared" | null; // which layer supplied the value (for the overlay's badge)
+};
+
+function resolveBundleTweaks(workspace: WorkspaceSettings, bundle: BundleState, pagePath: string): ResolvedTweak[] {
   const sharedValues = workspace.tweaks ?? {};
   const sharedDefs = bundle.tweakDefs ?? {};
   const pageValues = workspace.pageTweaks?.[pagePath] ?? {};
   const pageDefs = bundle.pageTweakDefs?.[pagePath] ?? {};
 
-  // Iterate the union of ids across all four maps so a page can introduce ids the shared
-  // set lacks (and vice versa).
+  // Union of ids across all four maps so a page can introduce ids the shared set lacks (and v.v.).
   const ids = new Set<string>([
     ...Object.keys(sharedValues),
     ...Object.keys(sharedDefs),
@@ -1357,31 +1425,38 @@ function bundleTweakStyle(workspace: WorkspaceSettings, bundle: BundleState, pag
     ...Object.keys(pageDefs),
   ]);
 
-  const decls: string[] = [];
-
+  const out: ResolvedTweak[] = [];
   for (const id of ids) {
     const def = { ...sharedDefs[id], ...pageDefs[id] };
-    const value = pageValues[id] ?? sharedValues[id];
-    if (value === undefined) {
-      continue;
+    let value: string | number | boolean | null = null;
+    let valueSource: "page" | "shared" | null = null;
+    if (pageValues[id] !== undefined) {
+      value = pageValues[id];
+      valueSource = "page";
+    } else if (sharedValues[id] !== undefined) {
+      value = sharedValues[id];
+      valueSource = "shared";
     }
-    if (!def.cssVar || def.cssVar.length === 0) {
-      continue;
-    }
-    const cssVar = def.cssVar;
-    const unit = (typeof def.unit === "string" && def.unit.length > 0 && typeof value === "number") ? def.unit : "";
+    out.push({ id, ...def, value, valueSource });
+  }
+  return out;
+}
 
-    let raw: string;
-    if (typeof value === "boolean") {
-      raw = value ? "1" : "0";
-    } else {
-      raw = String(value);
+// Build a static <style> block that injects tweak CSS custom properties into :root. Only tweaks
+// with a non-empty cssVar and a resolved value are emitted; values are sanitized so they cannot
+// break out of the style element or declaration.
+function bundleTweakStyle(workspace: WorkspaceSettings, bundle: BundleState, pagePath: string): string {
+  const decls: string[] = [];
+  for (const tweak of resolveBundleTweaks(workspace, bundle, pagePath)) {
+    if (tweak.value === null || !tweak.cssVar || tweak.cssVar.length === 0) {
+      continue;
     }
+    const unit = typeof tweak.unit === "string" && tweak.unit.length > 0 && typeof tweak.value === "number" ? tweak.unit : "";
+    const raw = typeof tweak.value === "boolean" ? (tweak.value ? "1" : "0") : String(tweak.value);
     // Strip characters that could break out of the style element or declaration.
     const sanitized = raw.replace(/[<>;{}]|\/\*/g, "");
-    decls.push(`${cssVar}: ${sanitized}${unit};`);
+    decls.push(`${tweak.cssVar}: ${sanitized}${unit};`);
   }
-
   if (decls.length === 0) {
     return "";
   }

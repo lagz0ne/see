@@ -560,6 +560,122 @@ describe("bundles", () => {
     expect(rootStyle(after)).toBe("");
   });
 
+  test("GET /tweaks returns the resolved per-page tweak set (defs + value + source)", async () => {
+    const { app } = await testApp();
+    const see = manifest({
+      exposed: ["index.html", "pricing.html"],
+      pages: { "pricing.html": { tweaks: { primaryColor: { value: "#0A84FF" } } } },
+    });
+    const payload = await (
+      await uploadFiles(
+        app,
+        [
+          indexFile(),
+          htmlFile("pricing.html", "<!doctype html><html><head></head><body><h1>Pricing</h1></body></html>"),
+          manifestFile(see),
+        ],
+        { editToken: "pw" },
+      )
+    ).json();
+    expect(payload.kind).toBe("bundle");
+
+    // No ?page → defaults to the homepage; primaryColor inherits the shared value.
+    const home = await (await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/tweaks`))).json();
+    expect(home.page).toBe("index.html");
+    const homeTweak = home.tweaks.find((t: { id: string }) => t.id === "primaryColor");
+    expect(homeTweak).toMatchObject({ cssVar: "--color-primary", value: "#D97757", valueSource: "shared", kind: "color" });
+
+    // pricing.html overrides the value → valueSource "page", inheriting the shared cssVar.
+    const pricing = await (
+      await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/tweaks?page=pricing.html`))
+    ).json();
+    expect(pricing.page).toBe("pricing.html");
+    const pricingTweak = pricing.tweaks.find((t: { id: string }) => t.id === "primaryColor");
+    expect(pricingTweak).toMatchObject({ value: "#0A84FF", valueSource: "page", cssVar: "--color-primary" });
+
+    // A plain (non-bundle) share has no tweaks.
+    const plain = await (await uploadFiles(app, [indexFile()], { editToken: "pw" })).json();
+    const plainTweaks = await (await app.fetch(new Request(`http://share.test/api/uploads/${plain.id}/tweaks`))).json();
+    expect(plainTweaks.tweaks).toEqual([]);
+  });
+
+  test("GET /tweaks without ?page matches the served root even when homepage is omitted", async () => {
+    const { app } = await testApp();
+    // No `homepage`: the content route serves the root index.html and applies its page override.
+    const see = JSON.stringify({
+      exposed: ["index.html"],
+      tweaks: { primaryColor: { kind: "color", value: "#D97757", cssVar: "--color-primary", label: "Primary" } },
+      pages: { "index.html": { tweaks: { primaryColor: { value: "#FF0000" } } } },
+    });
+    const payload = await (await uploadFiles(app, [indexFile(), manifestFile(see)], { editToken: "pw" })).json();
+    expect(payload.kind).toBe("bundle");
+
+    // The served root applies index.html's page override...
+    const rootHtml = await (await app.fetch(new Request(`http://share.test/content/${payload.id}/`))).text();
+    expect(rootStyle(rootHtml)).toContain("--color-primary: #FF0000");
+
+    // ...and GET /tweaks (no ?page) reports the SAME page override, not the shared default.
+    const tweaks = await (await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/tweaks`))).json();
+    expect(tweaks.page).toBe("index.html");
+    const t = tweaks.tweaks.find((x: { id: string }) => x.id === "primaryColor");
+    expect(t).toMatchObject({ value: "#FF0000", valueSource: "page" });
+  });
+
+  test("GET /tweaks resolves a canonicalized/SPA page to the served document (agrees with injected HTML)", async () => {
+    const { app } = await testApp();
+    const see = JSON.stringify({
+      homepage: "index.html",
+      exposed: ["index.html"],
+      tweaks: { primaryColor: { kind: "color", value: "#D97757", cssVar: "--color-primary", label: "Primary" } },
+      pages: { "index.html": { tweaks: { primaryColor: { value: "#123456" } } } },
+    });
+    const payload = await (await uploadFiles(app, [indexFile(), manifestFile(see)], { editToken: "pw" })).json();
+
+    // A client route with no backing file SPA-falls-back to index.html, which carries a page override.
+    const served = await (await app.fetch(new Request(`http://share.test/content/${payload.id}/some/client/route`))).text();
+    const servedColor = rootStyle(served).match(/--color-primary: (#[0-9a-fA-F]+)/)?.[1];
+    expect(servedColor).toBe("#123456");
+
+    // ?page= for that same route must resolve to the SAME key and report the SAME value, not shared.
+    const tweaks = await (
+      await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/tweaks?page=some%2Fclient%2Froute`))
+    ).json();
+    const t = tweaks.tweaks.find((x: { id: string }) => x.id === "primaryColor");
+    expect(t.value).toBe(servedColor);
+    expect(t.valueSource).toBe("page");
+  });
+
+  test("GET /tweaks resolves a page with a literal % (no double-decode), matching the content route", async () => {
+    const { app } = await testApp();
+    const pagePath = "100%.html";
+    const see = JSON.stringify({
+      homepage: "index.html",
+      exposed: ["index.html", pagePath],
+      tweaks: { primaryColor: { kind: "color", value: "#D97757", cssVar: "--color-primary", label: "Primary" } },
+      pages: { [pagePath]: { tweaks: { primaryColor: { value: "#ABCDEF" } } } },
+    });
+    const payload = await (
+      await uploadFiles(
+        app,
+        [indexFile(), htmlFile(pagePath, "<!doctype html><html><head></head><body>100%</body></html>"), manifestFile(see)],
+        { editToken: "pw" },
+      )
+    ).json();
+    expect(payload.kind).toBe("bundle");
+
+    // Served at the percent-encoded URL with its page override...
+    const served = await (await app.fetch(new Request(`http://share.test/content/${payload.id}/100%25.html`))).text();
+    expect(rootStyle(served)).toContain("--color-primary: #ABCDEF");
+
+    // ...and the endpoint resolves the same key without double-decoding (200, not 400 invalid_path).
+    const res = await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/tweaks?page=100%25.html`));
+    expect(res.status).toBe(200);
+    const tweaks = await res.json();
+    expect(tweaks.page).toBe("100%.html");
+    const t = tweaks.tweaks.find((x: { id: string }) => x.id === "primaryColor");
+    expect(t).toMatchObject({ value: "#ABCDEF", valueSource: "page" });
+  });
+
   test("a bundle injects the see:* runtime (port handshake to the viewer origin); a plain share does not", async () => {
     const { app } = await testApp();
     const bundle = await (await uploadFiles(app, [indexFile(), manifestFile(manifest())], { editToken: "pw" })).json();
