@@ -116,20 +116,24 @@ runtime state and its lifecycle** — this is a load-bearing role, not just UI:
 
 ## Work checklist (mirrors the task tracker)
 
-- [ ] **Review loop** — `scripts/codex-review.sh` (Codex cross-model review), `.codex-review/`
+- [x] **Review loop** — `scripts/codex-review.sh` (Codex cross-model review), `.codex-review/`
   gitignored, documented in `AGENTS.md`. Smoke-tested. Runs after every meaningful chunk.
-- [ ] **Phase 1 — Channel & runtime.** Origin-checked `see:*` postMessage protocol; runtime injected
-  into every bundle's served HTML (content origin, no CSP; degrades silently for plain shares);
-  tweak-runtime for `css`/`attr`/`class`/`store`; localStorage state + Clear-storage control.
+- [x] **Phase 1a — Content runtime** (committed `45ecc76`). `see:*` protocol; runtime injected into
+  every bundle's served HTML (port handshake to the viewer's concrete origin; thin applier, no
+  storage); `css` target; injected-HTML ETag versioned by runtime + viewer origin; plain shares
+  untouched.
+- [ ] **Phase 1b — Viewer half + targets.** Viewer handshake (identify child by `event.source`),
+  per-share state in viewer-origin localStorage, `see:state` on each handshake, Clear-storage / data
+  lifecycle; expand tweak targets to `attr`/`class`/`store`. Lands with the overlay (Phase 2).
 - [ ] **Phase 2 — Surface.** `GET /api/uploads/{id}/tweaks?page=` (resolved defs+values); generalized
   tweak schema in `bundle.ts` + `upload-metadata.ts` + `llms.txt`; `TweaksOverlay` Blueprint
   instrument (grouped, per-kind widgets, live drag, reset, inherited/overridden badges, page-aware,
   search); CSS auto-discovery (scan `:root` custom props + `var()`, infer kind/range/group/label,
-  one-click expose writing `see.json` via patch) + empty-state; bar toggle + `preview=1` wiring.
-- [ ] **Phase 3 — Review loop (product).** Inspector runtime (preview-gated); comment composer;
+  one-click expose writing `see.json` via patch) + empty-state; bar toggle + viewer-handshake wiring.
+- [ ] **Phase 3 — Review loop (product).** Inspector runtime (ships with the content runtime); comment composer;
   patch-vocab-keyed clipboard payload; `data-see` convention documented in `llms.txt`.
 - [ ] **Phase 4 — Compose.** `shared/` + `<see-include>` transclusion; `presets`/Looks + switcher.
-- [ ] **Close-out.** Docs (spec security contract for preview-only runtime, AGENTS.md, llms.txt,
+- [ ] **Close-out.** Docs (spec security contract for the all-viewers runtime, AGENTS.md, llms.txt,
   design.md if new tokens); tests (parse/validate targets, page-over-shared, include expansion,
   endpoint, bridge origin-check); bump `ASSET_VERSION` in `src/pages.ts`; green
   `bun run typecheck && bun run build:client && bun test` + a clean Codex review.
