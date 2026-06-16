@@ -676,6 +676,101 @@ describe("bundles", () => {
     expect(t).toMatchObject({ value: "#ABCDEF", valueSource: "page" });
   });
 
+  test("GET /tweaks/discover proposes :root tokens from CSS, flagging already-exposed ones", async () => {
+    const { app } = await testApp();
+    // --color-primary comes from index.html's inline <style> (the INDEX_HTML fixture); keep it out of
+    // this file so it isn't a cascade-ambiguous duplicate. The default manifest exposes it.
+    const css = ":root { --font-size-base: 16px; --gap: 8px; --accent: oklch(0.7 0.15 60); }";
+    const payload = await (
+      await uploadFiles(
+        app,
+        [
+          indexFile(),
+          new File([css], "styles.css", { type: "text/css" }),
+          // A CSS file with a literal % in its name must not 400 the discover request.
+          new File([":root { --pct: 50%; }"], "100%.css", { type: "text/css" }),
+          manifestFile(manifest()),
+        ],
+        { editToken: "pw" },
+      )
+    ).json();
+    expect(payload.kind).toBe("bundle");
+
+    const res = await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/tweaks/discover`));
+    expect(res.status).toBe(200);
+    const { candidates } = await res.json();
+    const byVar: Record<string, { exposed: boolean; kind: string; value: unknown; unit?: string }> = Object.fromEntries(
+      candidates.map((c: { cssVar: string }) => [c.cssVar, c]),
+    );
+
+    // Already a tweak (manifest primaryColor) → flagged exposed; the others are new and inferred.
+    expect(byVar["--color-primary"]).toMatchObject({ exposed: true, kind: "color" });
+    expect(byVar["--font-size-base"]).toMatchObject({ exposed: false, kind: "number", unit: "px", value: 16 });
+    expect(byVar["--gap"]).toMatchObject({ exposed: false, kind: "number", value: 8 });
+    expect(byVar["--accent"]).toMatchObject({ exposed: false, kind: "color" }); // oklch recognized as color
+    expect(byVar["--pct"]).toMatchObject({ kind: "number", unit: "%" }); // scanned from 100%.css, no 400
+
+    // A plain (non-bundle) share has nothing to discover.
+    const plain = await (await uploadFiles(app, [indexFile()], { editToken: "pw" })).json();
+    const plainRes = await (await app.fetch(new Request(`http://share.test/api/uploads/${plain.id}/tweaks/discover`))).json();
+    expect(plainRes.candidates).toEqual([]);
+  });
+
+  test("GET /tweaks/discover scans inline <style> blocks (single-file bundles)", async () => {
+    const { app } = await testApp();
+    const html =
+      "<!doctype html><html><head><style>:root{ --brand: #336699; --pad: 12px; }</style></head><body>Hi</body></html>";
+    // A bundle whose tokens live only in the HTML's inline <style> — no .css file.
+    const see = JSON.stringify({ homepage: "index.html", exposed: ["index.html"] });
+    const payload = await (
+      await uploadFiles(app, [new File([html], "index.html", { type: "text/html" }), manifestFile(see)], { editToken: "pw" })
+    ).json();
+    expect(payload.kind).toBe("bundle");
+
+    const { candidates } = await (
+      await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/tweaks/discover`))
+    ).json();
+    const byVar = Object.fromEntries(candidates.map((c: { cssVar: string }) => [c.cssVar, c]));
+    expect(byVar["--brand"]).toMatchObject({ kind: "color", value: "#336699" });
+    expect(byVar["--pad"]).toMatchObject({ kind: "number", unit: "px", value: 12 });
+  });
+
+  test("GET /tweaks/discover bounds the number of candidates", async () => {
+    const { app } = await testApp();
+    const vars = Array.from({ length: 260 }, (_, i) => `--v${i}: ${i}px;`).join(" ");
+    const payload = await (
+      await uploadFiles(
+        app,
+        [indexFile(), new File([`:root { ${vars} }`], "styles.css", { type: "text/css" }), manifestFile(manifest())],
+        { editToken: "pw" },
+      )
+    ).json();
+    const { candidates } = await (
+      await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/tweaks/discover`))
+    ).json();
+    expect(candidates.length).toBeLessThanOrEqual(200);
+  });
+
+  test("GET /tweaks/discover flags page-level exposed cssVars too", async () => {
+    const { app } = await testApp();
+    const css = ":root { --gap: 8px; }";
+    const see = JSON.stringify({
+      homepage: "index.html",
+      exposed: ["index.html"],
+      pages: { "index.html": { tweaks: { gapKnob: { kind: "number", value: 8, cssVar: "--gap", label: "Gap" } } } },
+    });
+    const payload = await (
+      await uploadFiles(app, [indexFile(), new File([css], "styles.css", { type: "text/css" }), manifestFile(see)], { editToken: "pw" })
+    ).json();
+    expect(payload.kind).toBe("bundle");
+
+    const { candidates } = await (
+      await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/tweaks/discover`))
+    ).json();
+    const gap = candidates.find((c: { cssVar: string }) => c.cssVar === "--gap");
+    expect(gap).toMatchObject({ exposed: true }); // already exposed via a page tweak
+  });
+
   test("a bundle injects the see:* runtime (port handshake to the viewer origin); a plain share does not", async () => {
     const { app } = await testApp();
     const bundle = await (await uploadFiles(app, [indexFile(), manifestFile(manifest())], { editToken: "pw" })).json();

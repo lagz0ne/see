@@ -373,17 +373,26 @@ function TweakControl({
 
   if (kind === "color") {
     const hex = String(value);
+    // Only 3/6-digit hex is picker-supported; alpha hex (#rgba / #rrggbbaa) uses the swatch + text.
+    const hexLike = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(hex.trim());
     return (
       <div className="flex items-center gap-2">
-        <input
-          id={id}
-          type="color"
-          value={toPickerHex(hex)}
-          onChange={(e) => onChange(e.target.value)}
-          className="size-8 shrink-0 cursor-pointer rounded-md border bg-transparent"
-          aria-label={`${tweak.label ?? tweak.id} color`}
-        />
+        {hexLike ? (
+          <input
+            id={id}
+            type="color"
+            value={toPickerHex(hex)}
+            onChange={(e) => onChange(e.target.value)}
+            className="size-8 shrink-0 cursor-pointer rounded-md border bg-transparent"
+            aria-label={`${tweak.label ?? tweak.id} color`}
+          />
+        ) : (
+          // Non-hex (oklch/rgb/named): a read-only swatch shows the real color (the native picker only
+          // does #rrggbb and would clobber the value to black on touch); the text field stays the editor.
+          <span aria-hidden className="size-8 shrink-0 rounded-md border" style={{ background: hex }} />
+        )}
         <Input
+          id={hexLike ? undefined : id}
           value={hex}
           onChange={(e) => onChange(e.target.value)}
           className="font-mono text-xs"

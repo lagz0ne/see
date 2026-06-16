@@ -105,6 +105,35 @@ export async function listResources(config: AppConfig, storagePath: string): Pro
   return listResourcesAtRoot(resolve(config.storageDir, storagePath));
 }
 
+// Lightweight listing — path + size via readdir/lstat only, NO file read or hash. For endpoints that
+// filter and size-budget before reading any contents (e.g. tweak discovery), so a large/asset-heavy
+// share is not fully buffered and hashed on every request.
+export async function listResourcePaths(
+  config: AppConfig,
+  storagePath: string,
+): Promise<Array<{ path: string; bytes: number }>> {
+  const root = resolve(config.storageDir, storagePath);
+  try {
+    if (!(await lstat(root)).isDirectory()) return [];
+  } catch {
+    return [];
+  }
+  const out: Array<{ path: string; bytes: number }> = [];
+  async function walk(relativeDir: string): Promise<void> {
+    const entries = await readdir(relativeDir ? join(root, relativeDir) : root, { withFileTypes: true });
+    for (const entry of entries) {
+      const relativePath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        await walk(relativePath);
+      } else if (entry.isFile()) {
+        out.push({ path: relativePath, bytes: (await lstat(join(root, relativePath))).size });
+      }
+    }
+  }
+  await walk("");
+  return out;
+}
+
 export async function deleteArtifact(config: AppConfig, storagePath: string): Promise<void> {
   await rm(join(config.storageDir, storagePath), { recursive: true, force: true });
 }

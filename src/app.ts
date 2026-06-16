@@ -9,6 +9,7 @@ import {
   deleteArtifact,
   deleteResource,
   listResources,
+  listResourcePaths,
   inputWritePath,
   resourceWritePath,
   randomEditToken,
@@ -38,6 +39,7 @@ import {
 } from "./upload-metadata";
 import { contentFrameSrc, contentOrigin, contentRootUrl, isContentHost, viewerUrl } from "./urls";
 import { contentRuntimeScript, CONTENT_RUNTIME_VERSION } from "./content-runtime";
+import { discoverTweaks, extractStyleBlocks } from "./tweak-discovery";
 import { AppError, type ResourceInfo, type UploadKind, type UploadRecord } from "./types";
 import { eventBus } from "./events";
 
@@ -122,6 +124,11 @@ export function createApp(config: AppConfig): StaticShareApp {
           return await handlePatchSettings(request, apiSettingsMatch[1], repo, config);
         }
         return textResponse("Method Not Allowed", 405);
+      }
+
+      const apiDiscoverMatch = url.pathname.match(/^\/api\/uploads\/([^/]+)\/tweaks\/discover$/);
+      if (method === "GET" && apiDiscoverMatch) {
+        return await handleDiscoverTweaks(apiDiscoverMatch[1], repo, config);
       }
 
       const apiTweaksMatch = url.pathname.match(/^\/api\/uploads\/([^/]+)\/tweaks$/);
@@ -448,6 +455,78 @@ async function resolveTweakPageKey(
   const assetPath = page && page.length > 0 ? page.split("/").map(encodeURIComponent).join("/") : "";
   const filePath = await resolveServedFile(root, assetPath, workspace.homepage, config.spaFallback);
   return servedPageKey(root, filePath);
+}
+
+// Bounds for the public tweak-discovery scan — guard against CPU/memory/response amplification from
+// a share that is within upload limits but packs huge CSS or hundreds of thousands of --vars.
+const MAX_DISCOVER_CSS_BYTES = 512 * 1024;
+const MAX_DISCOVER_CANDIDATES = 200;
+
+// Scan the bundle's CSS for :root custom properties and propose them as tweaks ("we found your
+// design tokens" — the offload that lets an author expose existing tokens without hand-writing
+// see.json). Marks candidates already exposed (their cssVar is a tweak) so the client offers the new
+// ones. Read-only; the client patches the chosen candidates into see.json via the patch API.
+async function handleDiscoverTweaks(id: string, repo: UploadsRepository, config: AppConfig): Promise<Response> {
+  if (!ID_PATTERN.test(id)) {
+    return jsonResponse({ error: "Upload not found", code: "not_found" }, 404);
+  }
+  const upload = repo.findById(id);
+  if (!upload) {
+    return jsonResponse({ error: "Upload not found", code: "not_found" }, 404);
+  }
+  if (isUploadExpired(upload)) {
+    markExpired(upload, repo);
+    return jsonResponse({ error: "Upload expired", code: "expired" }, 410);
+  }
+  if (upload.kind !== "bundle") {
+    return jsonResponse({ id: upload.id, revision: uploadRevision(upload), candidates: [] });
+  }
+
+  const root = resolve(config.storageDir, upload.storagePath);
+  // Lightweight path+size listing (no read/hash) so we can size-budget BEFORE reading any file —
+  // listResources would read and hash every stored asset, defeating the bound on this public GET.
+  const resources = await listResourcePaths(config, upload.storagePath);
+  // Bound the work for this unauthenticated GET: cap total scanned bytes (using each resource's known
+  // size, so oversized files are skipped without reading) and the number of candidates returned.
+  let budget = MAX_DISCOVER_CSS_BYTES;
+  const sources: string[] = [];
+  for (const resource of resources) {
+    const lower = resource.path.toLowerCase();
+    const isCss = lower.endsWith(".css");
+    const isHtml = lower.endsWith(".html") || lower.endsWith(".htm");
+    if (!isCss && !isHtml) continue;
+    if (resource.bytes > budget) continue;
+    // resource.path is an already-decoded stored path; re-encode per segment so resolveContentFile's
+    // single decode round-trips it (a literal "%" in a name would otherwise 400 the whole request).
+    const encoded = resource.path.split("/").map(encodeURIComponent).join("/");
+    const filePath = await resolveContentFile(root, encoded, false);
+    if (!filePath) continue;
+    budget -= resource.bytes;
+    const content = await Bun.file(filePath).text();
+    // Tokens live in standalone .css OR inline <style> blocks (single-file prototypes); scan both.
+    if (isCss) sources.push(content);
+    else sources.push(...extractStyleBlocks(content));
+  }
+
+  // Mark candidates whose cssVar is already a tweak so the client can offer only the new ones.
+  const exposed = new Set<string>();
+  const bundle = uploadBundle(upload);
+  for (const def of Object.values(bundle?.tweakDefs ?? {})) {
+    if (def.cssVar) exposed.add(def.cssVar);
+  }
+  // Page-level tweaks expose cssVars too — don't report those as new (would duplicate a control).
+  for (const pageDefs of Object.values(bundle?.pageTweakDefs ?? {})) {
+    for (const def of Object.values(pageDefs)) {
+      if (def.cssVar) exposed.add(def.cssVar);
+    }
+  }
+  // The limit aborts discovery early (bounds parse/walk work, not just the response size).
+  const candidates = discoverTweaks(sources, MAX_DISCOVER_CANDIDATES).map((tweak) => ({
+    ...tweak,
+    exposed: exposed.has(tweak.cssVar),
+  }));
+
+  return jsonResponse({ id: upload.id, revision: uploadRevision(upload), candidates });
 }
 
 async function handlePatchSettings(request: Request, id: string, repo: UploadsRepository, config: AppConfig): Promise<Response> {
