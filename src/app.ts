@@ -39,7 +39,7 @@ import {
 } from "./upload-metadata";
 import { contentFrameSrc, contentOrigin, contentRootUrl, isContentHost, viewerUrl } from "./urls";
 import { contentRuntimeScript, CONTENT_RUNTIME_VERSION } from "./content-runtime";
-import { discoverTweaks, extractStyleBlocks } from "./tweak-discovery";
+import { cssInjectionSafe, discoverTweaks, extractStyleBlocks } from "./tweak-discovery";
 import { AppError, type ResourceInfo, type UploadKind, type UploadRecord } from "./types";
 import { eventBus } from "./events";
 
@@ -129,6 +129,11 @@ export function createApp(config: AppConfig): StaticShareApp {
       const apiDiscoverMatch = url.pathname.match(/^\/api\/uploads\/([^/]+)\/tweaks\/discover$/);
       if (method === "GET" && apiDiscoverMatch) {
         return await handleDiscoverTweaks(apiDiscoverMatch[1], repo, config);
+      }
+
+      const apiExposeMatch = url.pathname.match(/^\/api\/uploads\/([^/]+)\/tweaks\/expose$/);
+      if (method === "POST" && apiExposeMatch) {
+        return await handleExposeTweaks(request, apiExposeMatch[1], repo, config);
       }
 
       const apiTweaksMatch = url.pathname.match(/^\/api\/uploads\/([^/]+)\/tweaks$/);
@@ -462,6 +467,17 @@ async function resolveTweakPageKey(
 const MAX_DISCOVER_CSS_BYTES = 512 * 1024;
 const MAX_DISCOVER_CANDIDATES = 200;
 
+// A tweak id not already taken, bounded to the 64-char manifest key limit — so exposing a discovered
+// token never clobbers an existing control (shared or any page) and always produces a valid key.
+function uniqueTweakId(base: string, taken: Set<string>): string {
+  if (!taken.has(base)) return base;
+  for (let i = 2; ; i += 1) {
+    const suffix = `-${i}`;
+    const id = `${base.slice(0, 64 - suffix.length)}${suffix}`;
+    if (!taken.has(id)) return id;
+  }
+}
+
 // Scan the bundle's CSS for :root custom properties and propose them as tweaks ("we found your
 // design tokens" — the offload that lets an author expose existing tokens without hand-writing
 // see.json). Marks candidates already exposed (their cssVar is a tweak) so the client offers the new
@@ -520,13 +536,147 @@ async function handleDiscoverTweaks(id: string, repo: UploadsRepository, config:
       if (def.cssVar) exposed.add(def.cssVar);
     }
   }
+  // sharedCount = size of the top-level `tweaks` set the 100-key cap applies to (Expose writes there),
+  // so the client bounds its selection by the SHARED remaining capacity, not the page-resolved union.
+  // sharedCount bounds the client's selection by the SHARED remaining capacity (Expose writes there).
+  const workspace = uploadWorkspace(upload);
+  const sharedCount = new Set([...Object.keys(workspace.tweaks ?? {}), ...Object.keys(bundle?.tweakDefs ?? {})]).size;
   // The limit aborts discovery early (bounds parse/walk work, not just the response size).
   const candidates = discoverTweaks(sources, MAX_DISCOVER_CANDIDATES).map((tweak) => ({
     ...tweak,
     exposed: exposed.has(tweak.cssVar),
   }));
 
-  return jsonResponse({ id: upload.id, revision: uploadRevision(upload), candidates });
+  return jsonResponse({ id: upload.id, revision: uploadRevision(upload), sharedCount, candidates });
+}
+
+// Expose chosen discovered tokens as shared tweaks. Uniqueness is resolved HERE, at write time,
+// against the current see.json — so a stale overlay or a second editor can't clobber an existing
+// tweak. Re-validates the resulting manifest (field validity + the 100-key cap) before writing.
+async function handleExposeTweaks(request: Request, id: string, repo: UploadsRepository, config: AppConfig): Promise<Response> {
+  rejectOversizedRequest(request, config.maxExtractedFileBytes, "expose_too_large");
+  if (!ID_PATTERN.test(id)) {
+    return jsonResponse({ error: "Upload not found", code: "not_found" }, 404);
+  }
+  const upload = repo.findById(id);
+  if (!upload) {
+    return jsonResponse({ error: "Upload not found", code: "not_found" }, 404);
+  }
+  if (isUploadExpired(upload)) {
+    markExpired(upload, repo);
+    return jsonResponse({ error: "Upload expired", code: "expired" }, 410);
+  }
+  await requireEditToken(request, upload);
+  if (upload.kind !== "bundle") {
+    return jsonResponse({ error: "Not a bundle", code: "not_a_bundle" }, 400);
+  }
+
+  let body: { tweaks?: unknown; revision?: unknown };
+  try {
+    body = (await request.json()) as { tweaks?: unknown; revision?: unknown };
+  } catch {
+    return jsonResponse({ error: "Body must be JSON", code: "invalid_body" }, 400);
+  }
+  const incoming = Array.isArray(body.tweaks) ? body.tweaks : [];
+  if (incoming.length === 0 || incoming.length > MAX_DISCOVER_CANDIDATES) {
+    return jsonResponse({ error: `tweaks must be 1..${MAX_DISCOVER_CANDIDATES} items`, code: "invalid_body" }, 400);
+  }
+  // Re-read the record AFTER the awaited auth/parse so the optimistic-concurrency check uses a fresh
+  // revision (not the initial snapshot): reject if the bundle changed since the client discovered
+  // these tokens, so a stale Expose can't override newer CSS defaults. The remaining window down to
+  // the write matches the rest of the app's read-modify-write paths. The client refetches on 409.
+  const current = repo.findById(id);
+  if (!current) {
+    return jsonResponse({ error: "Upload not found", code: "not_found" }, 404);
+  }
+  if (typeof body.revision === "number" && body.revision !== uploadRevision(current)) {
+    return jsonResponse({ error: "Share changed since discovery — refresh and retry", code: "stale_discovery" }, 409);
+  }
+
+  const root = resolve(config.storageDir, current.storagePath);
+  const seePath = await resolveContentFile(root, MANIFEST_FILENAME, false);
+  if (!seePath) {
+    return jsonResponse({ error: "Bundle has no see.json", code: "no_manifest" }, 400);
+  }
+  let manifest: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(await Bun.file(seePath).text());
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+    manifest = parsed as Record<string, unknown>;
+  } catch {
+    return jsonResponse({ error: "see.json is not valid JSON", code: "invalid_manifest" }, 422);
+  }
+
+  const tweaks =
+    manifest.tweaks && typeof manifest.tweaks === "object" && !Array.isArray(manifest.tweaks)
+      ? (manifest.tweaks as Record<string, unknown>)
+      : {};
+  manifest.tweaks = tweaks;
+
+  // taken = every existing tweak id, and exposedCssVars = every cssVar already driven by a tweak —
+  // read fresh from the manifest. This is the write-time check that closes the GET→POST race: ids are
+  // uniquified, and a cssVar already exposed (by a second editor / stale overlay) is skipped so we
+  // never create a duplicate control for the same variable.
+  const taken = new Set(Object.keys(tweaks));
+  const exposedCssVars = new Set<string>();
+  const collectCssVar = (def: unknown) => {
+    const cv = (def as { cssVar?: unknown } | null)?.cssVar;
+    if (typeof cv === "string" && cv.length > 0) exposedCssVars.add(cv);
+  };
+  for (const def of Object.values(tweaks)) collectCssVar(def);
+  const pages = manifest.pages && typeof manifest.pages === "object" ? (manifest.pages as Record<string, unknown>) : {};
+  for (const page of Object.values(pages)) {
+    const pageTweaks = (page as { tweaks?: unknown } | null)?.tweaks;
+    if (pageTweaks && typeof pageTweaks === "object" && !Array.isArray(pageTweaks)) {
+      for (const [k, def] of Object.entries(pageTweaks as Record<string, unknown>)) {
+        taken.add(k);
+        collectCssVar(def);
+      }
+    }
+  }
+
+  const ALLOWED = ["kind", "value", "cssVar", "label", "group", "unit", "min", "max", "step", "options"];
+  const exposedIds: string[] = [];
+  for (const item of incoming) {
+    if (!item || typeof item !== "object") continue;
+    const baseId = (item as { id?: unknown }).id;
+    if (typeof baseId !== "string" || baseId.length === 0) continue;
+    if (baseId === "__proto__" || baseId === "constructor" || baseId === "prototype") continue;
+    const cssVar = (item as { cssVar?: unknown }).cssVar;
+    if (typeof cssVar === "string" && exposedCssVars.has(cssVar)) continue; // already exposed — skip the dup
+    const rawValue = (item as { value?: unknown }).value;
+    const emitted = typeof rawValue === "boolean" ? (rawValue ? "1" : "0") : String(rawValue ?? "");
+    if (!cssInjectionSafe(emitted)) continue; // the injector would alter this value — skip (lossy)
+    const uniqueId = uniqueTweakId(baseId, taken);
+    taken.add(uniqueId);
+    const def: Record<string, unknown> = {};
+    for (const key of ALLOWED) {
+      const value = (item as Record<string, unknown>)[key];
+      if (value !== undefined) def[key] = value;
+    }
+    tweaks[uniqueId] = def;
+    exposedIds.push(uniqueId);
+    if (typeof cssVar === "string" && cssVar.length > 0) exposedCssVars.add(cssVar);
+  }
+  // Nothing new to write (all already exposed / invalid) — idempotent no-op, not a failure.
+  if (exposedIds.length === 0) {
+    return jsonResponse({ ok: true, revision: uploadRevision(upload), exposed: [] });
+  }
+
+  const newRaw = JSON.stringify(manifest);
+  const htmlPages = htmlPagesOf(await listResources(config, current.storagePath));
+  try {
+    deriveBundleState(parseManifest(newRaw), htmlPages, { strict: true });
+  } catch (error) {
+    const message = error instanceof AppError ? error.message : "see.json would be invalid";
+    return jsonResponse({ error: message, code: "invalid_manifest" }, 422);
+  }
+
+  const file = new File([newRaw], MANIFEST_FILENAME, { type: "application/json" });
+  const summary = await addOrReplaceResources(config, current.storagePath, [{ file, path: MANIFEST_FILENAME }]);
+  const payload = await persistResourceMutation(repo, config, current, summary);
+  logEvent("info", "tweaks_exposed", { id: current.id, count: exposedIds.length, revision: payload.revision });
+  return jsonResponse({ ok: true, revision: payload.revision, exposed: exposedIds });
 }
 
 async function handlePatchSettings(request: Request, id: string, repo: UploadsRepository, config: AppConfig): Promise<Response> {

@@ -80,6 +80,19 @@ describe("tweak discovery", () => {
     expect(sameSrc["accent"].value).toBe("#000000");
   });
 
+  test("never offers prototype-polluting ids like __proto__", () => {
+    const t = discoverTweaks([":root { --__proto__: 1px; --constructor: red; --gap: 8px; }"]);
+    expect(t.find((c) => c.id === "__proto__")).toBeUndefined();
+    expect(t.find((c) => c.id === "constructor")).toBeUndefined();
+    expect(t.find((c) => c.id === "gap")).toBeDefined();
+  });
+
+  test("does not offer text values the static injector would alter (lossy)", () => {
+    const t = discoverTweaks([":root{ --bad: a<b; --ok: hello; }"]);
+    expect(t.find((c) => c.id === "bad")).toBeUndefined(); // contains "<" → stripped by the injector → lossy
+    expect(t.find((c) => c.id === "ok")).toBeDefined();
+  });
+
   test("honors the candidate limit (bounds discovery work)", () => {
     const css = `:root { ${Array.from({ length: 50 }, (_, i) => `--v${i}: ${i}px;`).join(" ")} }`;
     expect(discoverTweaks([css], 10).length).toBeLessThanOrEqual(10);

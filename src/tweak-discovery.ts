@@ -101,6 +101,16 @@ function selectsRoot(selector: string): boolean {
     .some((s) => s === ":root" || s === "html" || s === ":root,html");
 }
 
+// Ids that, used as a JSON-pointer segment, would touch the object prototype instead of creating an
+// own key — never offer them as candidates.
+const RESERVED_IDS = new Set(["__proto__", "constructor", "prototype"]);
+
+// True when `value` survives the static injector's sanitization unchanged — bundleTweakStyle (app.ts)
+// strips <>;{} and /* before emitting, so a value containing them would be injected DIFFERENTLY than
+// declared, overriding the original CSS. Such values can't be exposed losslessly as a cssVar tweak.
+export function cssInjectionSafe(value: string): boolean {
+  return value.replace(/[<>;{}]|\/\*/g, "") === value;
+}
 const COLOR_RE = /^#[0-9a-fA-F]{3,8}$/;
 // Modern CSS color functions — Tailwind/shadcn design tokens are commonly oklch()/rgb()/hsl().
 const COLOR_FN_RE = /^(rgb|rgba|hsl|hsla|hwb|lab|lch|oklab|oklch|color)\(/i;
@@ -109,7 +119,7 @@ const NUMBER_RE = /^(-?\d*\.?\d+)\s*(px|rem|em|%|vh|vw|vmin|vmax|pt|ch)?$/;
 function inferTweak(prop: string, value: string): DiscoveredTweak | null {
   if (value.length === 0 || value.length > 200) return null; // skip empty / pathological
   const id = prop.slice(2);
-  if (id.length === 0 || id.length > 64) return null;
+  if (id.length === 0 || id.length > 64 || RESERVED_IDS.has(id)) return null;
   const label = humanizeLabel(id);
   const group = humanizeGroup(id);
 
@@ -124,6 +134,8 @@ function inferTweak(prop: string, value: string): DiscoveredTweak | null {
     return { id, cssVar: prop, kind: "number", value: n, ...(unit ? { unit } : {}), ...numberRange(n, unit), label, group };
   }
 
+  // text — only when it survives the static injector losslessly (else exposing would change the render).
+  if (!cssInjectionSafe(value)) return null;
   return { id, cssVar: prop, kind: "text", value, label, group };
 }
 

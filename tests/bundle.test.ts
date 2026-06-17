@@ -698,7 +698,9 @@ describe("bundles", () => {
 
     const res = await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/tweaks/discover`));
     expect(res.status).toBe(200);
-    const { candidates } = await res.json();
+    const disc = await res.json();
+    expect(disc.sharedCount).toBe(1); // the manifest's single shared tweak (primaryColor)
+    const candidates = disc.candidates;
     const byVar: Record<string, { exposed: boolean; kind: string; value: unknown; unit?: string }> = Object.fromEntries(
       candidates.map((c: { cssVar: string }) => [c.cssVar, c]),
     );
@@ -769,6 +771,69 @@ describe("bundles", () => {
     ).json();
     const gap = candidates.find((c: { cssVar: string }) => c.cssVar === "--gap");
     expect(gap).toMatchObject({ exposed: true }); // already exposed via a page tweak
+  });
+
+  test("POST /tweaks/expose resolves id collisions at write time without clobbering, and requires auth", async () => {
+    const { app } = await testApp();
+    // Existing shared tweak id "gap" with a DIFFERENT cssVar; we expose a discovered --gap (base id "gap").
+    const see = JSON.stringify({
+      homepage: "index.html",
+      exposed: ["index.html"],
+      tweaks: { gap: { kind: "number", value: 4, cssVar: "--space-gap", label: "Gap" } },
+    });
+    const payload = await (await uploadFiles(app, [indexFile(), manifestFile(see)], { editToken: "pw" })).json();
+    expect(payload.kind).toBe("bundle");
+
+    const exposeReq = (auth: boolean) =>
+      new Request(`http://share.test/api/uploads/${payload.id}/tweaks/expose`, {
+        method: "POST",
+        headers: auth
+          ? { "content-type": "application/json", authorization: "Bearer pw" }
+          : { "content-type": "application/json" },
+        body: JSON.stringify({ tweaks: [{ id: "gap", kind: "number", value: 8, cssVar: "--gap", label: "Gap", group: "Gap" }] }),
+      });
+
+    // Password share → expose without the token is rejected.
+    expect((await app.fetch(exposeReq(false))).status).toBe(401);
+
+    // A stale discovery revision is rejected (optimistic concurrency) so it can't override newer CSS.
+    const stale = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/tweaks/expose`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer pw" },
+        body: JSON.stringify({ revision: 999, tweaks: [{ id: "z", kind: "number", value: 1, cssVar: "--z" }] }),
+      }),
+    );
+    expect(stale.status).toBe(409);
+
+    // With the token: the id collides with the existing "gap", so a fresh id is chosen at write time.
+    const res = await app.fetch(exposeReq(true));
+    expect(res.status).toBe(200);
+    const out = await res.json();
+    expect(out.exposed).toHaveLength(1);
+    expect(out.exposed[0]).not.toBe("gap");
+
+    // The original "gap" (--space-gap) is preserved AND the new --gap tweak was added.
+    const tweaks = await (await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/tweaks`))).json();
+    const byVar = Object.fromEntries(tweaks.tweaks.map((t: { cssVar: string }) => [t.cssVar, t]));
+    expect(byVar["--space-gap"]).toBeDefined();
+    expect(byVar["--gap"]).toBeDefined();
+
+    // Re-exposing the same cssVar is a no-op (skipped at write time), never a duplicate control.
+    const again = await app.fetch(exposeReq(true));
+    expect(again.status).toBe(200);
+    expect((await again.json()).exposed).toHaveLength(0);
+
+    // A lossy text value (chars the injector strips) is skipped, not persisted to render differently.
+    const lossy = await app.fetch(
+      new Request(`http://share.test/api/uploads/${payload.id}/tweaks/expose`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer pw" },
+        body: JSON.stringify({ tweaks: [{ id: "danger", kind: "text", value: "a;b", cssVar: "--danger" }] }),
+      }),
+    );
+    expect(lossy.status).toBe(200);
+    expect((await lossy.json()).exposed).toHaveLength(0);
   });
 
   test("a bundle injects the see:* runtime (port handshake to the viewer origin); a plain share does not", async () => {

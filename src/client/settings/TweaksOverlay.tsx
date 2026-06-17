@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { RotateCcw, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -24,6 +25,22 @@ type ResolvedTweak = {
   valueSource: "page" | "shared" | null;
 };
 
+// Mirrors GET /api/uploads/:id/tweaks/discover (a token found in the bundle's CSS, plus whether it
+// is already exposed as a tweak).
+type DiscoveredCandidate = {
+  id: string;
+  cssVar: string;
+  kind: "color" | "number" | "text";
+  value: string | number;
+  unit?: string;
+  min?: number;
+  max?: number;
+  step?: number;
+  label: string;
+  group: string;
+  exposed: boolean;
+};
+
 type ControlValue = string | number | boolean;
 
 // localStorage map is cssVar -> the FORMATTED css string the runtime applies verbatim (e.g. "20px",
@@ -32,6 +49,9 @@ type ControlValue = string | number | boolean;
 type Overrides = Record<string, string>;
 
 const STORE_PREFIX = "see.tweaks.";
+// Mirrors the server's per-set tweak cap (src/bundle.ts) — exposing must not exceed it or the patch
+// is rejected as invalid_manifest.
+const MANIFEST_TWEAK_LIMIT = 100;
 
 function readOverrides(key: string): Overrides {
   try {
@@ -173,6 +193,10 @@ export function TweaksOverlay({
   onClose: () => void;
 }) {
   const [tweaks, setTweaks] = useState<ResolvedTweak[] | null>(null);
+  const [candidates, setCandidates] = useState<DiscoveredCandidate[]>([]);
+  const [sharedCount, setSharedCount] = useState(0);
+  const [discoverRevision, setDiscoverRevision] = useState(0);
+  const [refreshNonce, setRefreshNonce] = useState(0);
   const { overrides, setTweak, resetTweak, clearAll } = bridge;
 
   useEffect(() => {
@@ -189,8 +213,28 @@ export function TweaksOverlay({
     return () => {
       cancelled = true;
     };
-    // revision is in the key so a see.json patch (which bumps it) refetches the resolved defs.
-  }, [uploadId, page, revision]);
+    // revision/refreshNonce in the key: a see.json patch (which bumps revision) or a local Expose
+    // refetches the resolved defs.
+  }, [uploadId, page, revision, refreshNonce]);
+
+  // Discovery candidates (share-wide): tokens found in the CSS, flagged whether already exposed.
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/uploads/${uploadId}/tweaks/discover`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : { candidates: [], sharedCount: 0 }))
+      .then((d) => {
+        if (cancelled) return;
+        setCandidates(Array.isArray(d.candidates) ? d.candidates : []);
+        setSharedCount(typeof d.sharedCount === "number" ? d.sharedCount : 0);
+        setDiscoverRevision(typeof d.revision === "number" ? d.revision : 0);
+      })
+      .catch(() => {
+        if (!cancelled) setCandidates([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [uploadId, revision, refreshNonce]);
 
   // Only tweaks with a cssVar are drivable by the runtime; group them for a spec-sheet layout.
   const groups = useMemo(() => {
@@ -205,6 +249,9 @@ export function TweaksOverlay({
   }, [tweaks]);
 
   const dirtyCount = Object.keys(overrides).length;
+  // Memoized so its reference is stable across unrelated overlay re-renders (e.g. an override change) —
+  // otherwise DiscoverSection re-seeds its selection and re-checks tokens the user just unchecked.
+  const newCandidates = useMemo(() => candidates.filter((c) => !c.exposed), [candidates]);
 
   return (
     <aside className="pointer-events-auto fixed top-20 right-3 bottom-3 z-40 flex w-80 max-w-[calc(100vw-1.5rem)] flex-col overflow-hidden rounded-lg border bg-card text-card-foreground">
@@ -221,28 +268,39 @@ export function TweaksOverlay({
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-3 py-3">
         {tweaks === null ? (
           <p className="font-mono text-xs text-muted-foreground">Loading…</p>
-        ) : groups.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No design tokens exposed. Add <span className="font-mono">tweaks</span> with a{" "}
-            <span className="font-mono">cssVar</span> to <span className="font-mono">see.json</span>.
-          </p>
         ) : (
-          groups.map(([group, items]) => (
-            <section key={group} className="flex flex-col gap-3">
-              {group ? (
-                <h3 className="font-mono text-[0.65rem] tracking-[0.12em] text-muted-foreground uppercase">{group}</h3>
-              ) : null}
-              {items.map((tweak) => (
-                <TweakRow
-                  key={tweak.id}
-                  tweak={tweak}
-                  override={tweak.cssVar ? overrides[tweak.cssVar] : undefined}
-                  onChange={(value) => tweak.cssVar && setTweak(tweak.cssVar, formatCssValue(tweak, value))}
-                  onReset={() => tweak.cssVar && resetTweak(tweak.cssVar)}
-                />
-              ))}
-            </section>
-          ))
+          <>
+            {groups.map(([group, items]) => (
+              <section key={group} className="flex flex-col gap-3">
+                {group ? (
+                  <h3 className="font-mono text-[0.65rem] tracking-[0.12em] text-muted-foreground uppercase">{group}</h3>
+                ) : null}
+                {items.map((tweak) => (
+                  <TweakRow
+                    key={tweak.id}
+                    tweak={tweak}
+                    override={tweak.cssVar ? overrides[tweak.cssVar] : undefined}
+                    onChange={(value) => tweak.cssVar && setTweak(tweak.cssVar, formatCssValue(tweak, value))}
+                    onReset={() => tweak.cssVar && resetTweak(tweak.cssVar)}
+                  />
+                ))}
+              </section>
+            ))}
+            <DiscoverSection
+              candidates={newCandidates}
+              uploadId={uploadId}
+              capacity={Math.max(0, MANIFEST_TWEAK_LIMIT - sharedCount)}
+              discoverRevision={discoverRevision}
+              onExposed={() => setRefreshNonce((n) => n + 1)}
+            />
+            {groups.length === 0 && newCandidates.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                No design tokens exposed, and none found in this share's CSS. Add{" "}
+                <span className="font-mono">tweaks</span> with a <span className="font-mono">cssVar</span> to{" "}
+                <span className="font-mono">see.json</span>.
+              </p>
+            ) : null}
+          </>
         )}
       </div>
 
@@ -433,4 +491,143 @@ function defaultForKind(tweak: ResolvedTweak): ControlValue {
     default:
       return "";
   }
+}
+
+// The see.json tweak object for a discovered candidate (keeps the def fields, drops id/exposed).
+function manifestTweakOf(c: DiscoveredCandidate): Record<string, unknown> {
+  const tweak: Record<string, unknown> = {
+    kind: c.kind,
+    value: c.value,
+    cssVar: c.cssVar,
+    label: c.label,
+    group: c.group,
+  };
+  if (c.unit) tweak.unit = c.unit;
+  if (c.kind === "number") {
+    if (typeof c.min === "number") tweak.min = c.min;
+    if (typeof c.max === "number") tweak.max = c.max;
+    if (typeof c.step === "number") tweak.step = c.step;
+  }
+  return tweak;
+}
+
+// The "we found your design tokens" offload: lists CSS tokens not yet exposed and one-click writes
+// the chosen ones into see.json via the patch API. Auth: open shares need no token; password shares
+// reveal an edit-token field on a 401.
+function DiscoverSection({
+  candidates,
+  uploadId,
+  capacity,
+  discoverRevision,
+  onExposed,
+}: {
+  candidates: DiscoveredCandidate[];
+  uploadId: string;
+  capacity: number;
+  discoverRevision: number;
+  onExposed: () => void;
+}) {
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(candidates.slice(0, capacity).map((c) => c.id)));
+  const [token, setToken] = useState("");
+  const [needsToken, setNeedsToken] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Re-seed when the candidate set or capacity changes — capped at the remaining manifest capacity so
+  // the default one-click Expose can't exceed the tweak limit and get rejected.
+  useEffect(() => {
+    setSelected(new Set(candidates.slice(0, capacity).map((c) => c.id)));
+  }, [candidates, capacity]);
+
+  if (candidates.length === 0) return null;
+
+  const chosen = candidates.filter((c) => selected.has(c.id));
+  const overCapacity = chosen.length > capacity;
+
+  async function expose() {
+    if (chosen.length === 0 || overCapacity) return;
+    setBusy(true);
+    setError(null);
+    // The server resolves each id's uniqueness at write time, so a second editor can't clobber.
+    const tweaks = chosen.map((c) => ({ id: c.id, ...manifestTweakOf(c) }));
+    try {
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (token.trim()) headers.Authorization = `Bearer ${token.trim()}`;
+      const res = await fetch(`/api/uploads/${uploadId}/tweaks/expose`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ revision: discoverRevision, tweaks }),
+      });
+      if (res.status === 401) {
+        setNeedsToken(true);
+        setError("This share needs an edit token to expose tokens.");
+      } else if (res.status === 409) {
+        setError("Tokens changed since you opened this — refreshed, try again.");
+        onExposed();
+      } else if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setError(body?.error || "Couldn't expose those tokens.");
+      } else {
+        const body = await res.json().catch(() => null);
+        const exposed = Array.isArray(body?.exposed) ? body.exposed : [];
+        if (exposed.length === 0) setError("Those tokens are already exposed.");
+        onExposed(); // refresh either way so the panel reflects the current manifest
+      }
+    } catch {
+      setError("Couldn't expose those tokens.");
+    }
+    setBusy(false);
+  }
+
+  return (
+    <section className="flex flex-col gap-3 rounded-md border border-dashed px-3 py-3">
+      <div className="flex flex-col gap-0.5">
+        <h3 className="font-mono text-[0.65rem] tracking-[0.12em] text-muted-foreground uppercase">From your CSS</h3>
+        <p className="text-sm">
+          Found <span className="font-mono tabular-nums">{candidates.length}</span> token
+          {candidates.length === 1 ? "" : "s"} not yet exposed.
+        </p>
+      </div>
+      <ul className="flex flex-col gap-1.5">
+        {candidates.map((c) => (
+          <li key={c.id} className="flex items-center gap-2">
+            <Checkbox
+              id={`disc-${c.id}`}
+              checked={selected.has(c.id)}
+              onCheckedChange={(value) =>
+                setSelected((prev) => {
+                  const next = new Set(prev);
+                  if (value) next.add(c.id);
+                  else next.delete(c.id);
+                  return next;
+                })
+              }
+            />
+            <Label htmlFor={`disc-${c.id}`} className="flex min-w-0 flex-1 items-center justify-between gap-2 font-normal">
+              <span className="truncate">{c.label}</span>
+              <span className="shrink-0 font-mono text-[0.65rem] text-muted-foreground">{c.cssVar}</span>
+            </Label>
+          </li>
+        ))}
+      </ul>
+      {capacity === 0 ? (
+        <p className="text-xs text-muted-foreground">Tweak limit reached — remove some before exposing more.</p>
+      ) : overCapacity ? (
+        <p className="text-xs text-destructive">Select at most {capacity} (the manifest tweak limit).</p>
+      ) : null}
+      {needsToken ? (
+        <Input
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+          placeholder="Edit token"
+          className="font-mono text-xs"
+          spellCheck={false}
+        />
+      ) : null}
+      {error ? <p className="text-xs text-destructive">{error}</p> : null}
+      <Button size="sm" onClick={expose} disabled={busy || chosen.length === 0 || overCapacity || capacity === 0}>
+        Expose{chosen.length > 0 ? ` ${chosen.length}` : ""}
+      </Button>
+    </section>
+  );
 }
