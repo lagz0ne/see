@@ -39,6 +39,7 @@ import {
 } from "./upload-metadata";
 import { contentFrameSrc, contentOrigin, contentRootUrl, isContentHost, viewerUrl } from "./urls";
 import { contentRuntimeScript, CONTENT_RUNTIME_VERSION } from "./content-runtime";
+import { expandIncludes } from "./includes";
 import { cssInjectionSafe, discoverTweaks, extractStyleBlocks } from "./tweak-discovery";
 import { AppError, type ResourceInfo, type UploadKind, type UploadRecord } from "./types";
 import { eventBus } from "./events";
@@ -1320,7 +1321,11 @@ async function handleContentRequest(
     const style = bundle ? bundleTweakStyle(uploadWorkspace(upload), bundle, pagePath) : "";
     const runtime = contentRuntimeScript({ id: upload.id, viewerOrigin });
     const html = await Bun.file(filePath).text();
-    const injected = await injectIntoHead(html, style + runtime);
+    // Expand <see-include src="…"> against the share's own resources (token economy). Bundle-only:
+    // plain shares stay untouched. The page ETag keys on the upload revision, which any fragment edit
+    // bumps, so cached pages re-render when an included fragment changes.
+    const composed = await expandIncludes(html, (p) => loadIncludeFragment(root, p));
+    const injected = await injectIntoHead(composed, style + runtime);
     // Content-Length reflects the rewritten body; the ETag keys on revision AND the runtime version
     // (see willInject), so caches invalidate on a see.json change or a runtime change.
     return new Response(injected, { status: 200, headers });
@@ -1403,6 +1408,26 @@ async function resolveServedFile(
 // file is outside the root or unresolved.
 function servedPageKey(root: string, filePath: string | null): string {
   return filePath && filePath.startsWith(root + sep) ? filePath.slice(root.length + 1).split(sep).join("/") : "";
+}
+
+// Per-fragment ceiling for <see-include> transclusion — a hostile/accidental huge file can't blow up
+// a page render (overall expansion is also depth/count-bounded in includes.ts).
+const MAX_INCLUDE_FRAGMENT_BYTES = 512 * 1024;
+
+// Loader for expandIncludes: read a fragment by its normalized, root-relative path, enforcing the
+// share-root boundary (no traversal/symlink escape) and the size ceiling. Returns null (→ expands to
+// nothing) on anything missing, oversized, or out of bounds.
+async function loadIncludeFragment(root: string, path: string): Promise<string | null> {
+  const full = resolve(root, path);
+  const rootWithSep = root.endsWith(sep) ? root : `${root}${sep}`;
+  if (full !== root && !full.startsWith(rootWithSep)) return null;
+  try {
+    const info = await stat(full);
+    if (!info.isFile() || info.size > MAX_INCLUDE_FRAGMENT_BYTES) return null;
+    return await Bun.file(full).text();
+  } catch {
+    return null;
+  }
 }
 
 function parseContentRoute(config: AppConfig, url: URL): { id: string; assetPath: string } | null {

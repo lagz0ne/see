@@ -236,6 +236,56 @@ describe("bundles", () => {
     expect(indexStyle).not.toContain("#0A84FF");
   });
 
+  test("expands <see-include> against shared resources, leaving the raw file untouched", async () => {
+    const { app } = await testApp();
+    const page =
+      '<!doctype html><html><head></head><body><see-include src="shared/nav.html">…</see-include><main>Home</main></body></html>';
+    const payload = await (
+      await uploadFiles(
+        app,
+        [
+          htmlFile("index.html", page),
+          htmlFile("shared/nav.html", '<nav id="topnav">Shared nav</nav>'),
+          manifestFile(manifest()),
+        ],
+        { editToken: "pw" },
+      )
+    ).json();
+    expect(payload.kind).toBe("bundle");
+
+    // Served HTML has the fragment transcluded and the custom element gone.
+    const served = await app.fetch(new Request(`http://share.test/content/${payload.id}/index.html`));
+    expect(served.status).toBe(200);
+    const html = await served.text();
+    expect(html).toContain('<nav id="topnav">Shared nav</nav>');
+    expect(html).not.toContain("see-include");
+    expect(html).not.toContain("…"); // fallback content replaced
+
+    // The RAW stored page is unchanged — expansion is serve-time only.
+    const raw = await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/resources/index.html`));
+    const rawText = await raw.text();
+    expect(rawText).toContain("see-include");
+    expect(rawText).not.toContain("Shared nav");
+  });
+
+  test("a missing or traversing <see-include> expands to nothing (page still serves)", async () => {
+    const { app } = await testApp();
+    const page =
+      '<!doctype html><html><head></head><body><see-include src="../see.json"></see-include><see-include src="shared/missing.html"></see-include><main>OK</main></body></html>';
+    const payload = await (
+      await uploadFiles(app, [htmlFile("index.html", page), manifestFile(manifest())], { editToken: "pw" })
+    ).json();
+    expect(payload.kind).toBe("bundle");
+
+    const served = await app.fetch(new Request(`http://share.test/content/${payload.id}/index.html`));
+    expect(served.status).toBe(200);
+    const html = await served.text();
+    expect(html).toContain("<main>OK</main>");
+    expect(html).not.toContain("see-include");
+    // The traversal target's contents never leak into the page.
+    expect(html).not.toContain("homepage");
+  });
+
   test("a value-only page override inherits the shared cssVar and unit", async () => {
     const { app } = await testApp();
     const see = manifest({

@@ -71,6 +71,26 @@ Edit `see.json` via the viewer's settings resource editor or the structured patc
 
 An invalid manifest is rejected loudly (422 `invalid_manifest` on patch, 400 on upload/replace) and nothing is written. The Settings endpoint only accepts `password`; homepage/exposed/bar/tweaks/pages are owned by `see.json`.
 
+### Shared fragments — `<see-include>` (token economy)
+
+Author a fragment once and reference it from many pages so your output stays small. Put reusable markup anywhere (the `shared/` directory is the convention) and transclude it:
+
+```html
+<!-- index.html -->
+<body>
+  <see-include src="shared/nav.html"></see-include>
+  <main>…</main>
+</body>
+
+<!-- shared/nav.html -->
+<nav>… shared markup …</nav>
+```
+
+- `src` is a resource path relative to the share root. The server expands `<see-include>` at serve time for **bundle HTML only** — the raw stored file keeps the element; the served `/content/{id}/…` page shows the fragment. Editing a fragment bumps the revision, so every page that includes it re-renders and open viewers live-reload.
+- Fragments are HTML **fragments**, not whole documents (no `<html>/<head>/<body>`). They may nest other `<see-include>`s (bounded depth; cycles are ignored).
+- Always use an explicit close tag: `<see-include src="…"></see-include>`. Any fallback content between the tags is replaced on expansion.
+- A missing, traversing (`../`), or oversized `src` expands to nothing — a bad reference never breaks the page. Vary one shared fragment per page with per-page tweaks (CSS vars) instead of cloning it.
+
 ---
 
 ## Editing content (for agents)
