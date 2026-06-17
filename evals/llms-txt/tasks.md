@@ -32,6 +32,13 @@ per-page overrides yet.
 6. Edit the stylesheet `theme.css`: change the `.cta` rule's `color` to `#0A84FF` (a real
    CSS-file edit, not a tweak). Verify the served `theme.css` now declares `color: #0A84FF`.
 7. Claim the friendly name `acme-store`; confirm the new id resolves and the old one 404s.
+8. Factor a shared header into `shared/header.html` and reference it from **both** pages with
+   `<see-include src="shared/header.html">`. Verify the rendered pages transclude the header and
+   the **raw** stored `index.html` still contains the `<see-include>` tag (serve-time only).
+9. Add a `Dark` preset/"Look" that sets `primaryColor` to `#0A0A0A`. Verify `GET /tweaks` returns
+   it under `presets`.
+10. Add a tweak that toggles a `compact` class on `<body>` (a `class` target, not a CSS var).
+    Verify `GET /tweaks` returns it with `target: "class"`, `selector`, and `class`.
 
 ## Scorecard the agent returns (JSON)
 

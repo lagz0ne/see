@@ -47,15 +47,16 @@ root.
 - **Security model is load-bearing:** uploaded content is untrusted. Keep it on the
   separate content origin and keep the viewer iframe sandbox without `allow-same-origin`.
   Don't loosen the viewer CSP.
-- **Bundles:** an upload with a root `see.json` is a first-class *bundle* — the manifest
-  declares `homepage`, `exposed`, `bar`, and `tweaks`. For tweaks that carry a `cssVar`
-  field, the content handler injects a single static `<style>` block of `:root` CSS custom
-  properties into served HTML (the one sanctioned exception to "no injection" — see the spec
-  § Security Contract). No script is injected. Tweaks support **per-page inheritance**: root
-  `tweaks` are shared defaults, and an optional `see.json` `pages` map carries per-page
-  overrides (partial tweaks) resolved **page-over-shared** at serve time — still zero page JS,
-  one injected `<style>` per served page. The manifest projects onto the existing
-  `WorkspaceSettings`; agent-facing schema lives in `src/docs/llms.txt`.
+- **Bundles:** an upload with a root `see.json` is a first-class *bundle* — the manifest declares
+  `homepage`, `exposed`, `bar`, `tweaks`, `pages`, and `presets`. Into a bundle's served HTML the
+  content handler injects (1) a static `<style>` of `:root` CSS custom properties for `css`-target
+  tweaks and (2) the minimal `see:*` content runtime `<script>` (the applier half of the viewer
+  bridge — see the spec § Security Contract). Plain (non-bundle) shares are served byte-for-byte
+  untouched. Tweaks support **per-page inheritance** (root shared defaults + a `pages` map of partial
+  overrides, resolved **page-over-shared**) and three **targets**: `css` (static var), `attr` / `class`
+  (DOM ops the runtime applies live). The manifest also carries `presets` ("Looks"), and the server
+  expands `<see-include src>` shared fragments at serve time (token economy). The manifest projects
+  onto `WorkspaceSettings` + `BundleState`; agent-facing schema lives in `src/docs/llms.txt`.
 
 ## Skills
 
@@ -88,10 +89,14 @@ context in `docs/goal-prototyping-surface.md`):
    CSP — uploaded apps already run arbitrary JS under the sandbox, so injecting a runtime there is
    not a new capability). The injected prototype runtime (bridge / tweak-runtime / inspector)
    ships to all content-origin viewers, so it MUST be minimal, self-contained, and trusted: no
-   `eval`/remote code, no secrets, and every `postMessage` handler MUST verify `event.origin`
-   against the viewer origin (both directions). It MUST degrade silently when its injected config
-   is absent (non-bundle shares) and MUST NOT be drivable by an untrusted origin. Flag any
-   origin-check gap, sandbox/viewer-CSP loosening, or runtime that trusts an arbitrary sender.
+   `eval`/remote code, no secrets. The cross-window bridge uses a **MessageChannel**: the sandboxed
+   child (opaque origin) initiates the handshake by posting to the viewer's **concrete** origin
+   (never a wildcard) and transferring a port; all further traffic is point-to-point over that port.
+   The viewer identifies its child by `event.source` (the opaque origin can't be matched) and treats
+   inbound port messages as **untrusted** (bounded text, never eval'd). It MUST degrade silently when
+   there is no viewer parent (plain/standalone shares) and MUST NOT be drivable by an untrusted
+   origin. Flag any wildcard `targetOrigin`, sandbox/viewer-CSP loosening, or runtime/viewer that
+   acts on an unvalidated inbound message.
 2. **Correctness.** Logic bugs, unhandled errors, races; per-page tweak resolution must be
    page-over-shared merged per field; localStorage keys must not collide across shares;
    serve-time include/transclusion must reject missing/cyclic includes and path escapes.

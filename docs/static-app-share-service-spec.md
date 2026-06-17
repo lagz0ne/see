@@ -160,7 +160,7 @@ Important theme note:
 
 - The light/dark switch is guaranteed to affect the managed viewer UI.
 - It should not mutate uploaded content by default.
-- Uploaded content may respond to its own CSS, JS, or `prefers-color-scheme`, but the parent viewer should not inject code into user artifacts in the MVP.
+- Uploaded content may respond to its own CSS, JS, or `prefers-color-scheme`. The viewer injects code into uploaded artifacts only for **bundles**, and only the sanctioned tweak `<style>` + minimal `see:*` content runtime (see § Security Contract → Bundle injection + content runtime); plain shares are never modified.
 
 Post-MVP inspection features:
 
@@ -506,21 +506,40 @@ The viewer iframe must:
 
 Parent viewer must not:
 
-- Inject scripts into uploaded content.
-- Trust messages from the iframe unless an explicit postMessage protocol is added.
+- Loosen the iframe sandbox (no `allow-same-origin`) or the viewer-origin CSP.
+- Persist any runtime / tweak / inspector state on the server — it lives only in viewer-origin
+  localStorage (clearable). The human never writes to the server.
+- Act on an inbound iframe message without validating it (see the bridge below).
 - Expose admin or upload credentials to the iframe.
 
-Bundle injection exception:
+Bundle injection + content runtime:
 
-- A **bundle** is an upload containing a root `see.json` manifest. When a bundle declares
-  tweaks with `cssVar` fields, the content handler injects exactly one thing into served
-  HTML: a single static `<style>` block of `:root` CSS custom properties derived from the
-  bundle's tweak values (e.g. `<style>:root { --color-primary: #D97757; --font-size-base: 16px; }</style>`).
-- No script is injected. Nothing executable is read or derived from the upload. Uploaded
-  scripts are never modified.
-- Injection only happens for bundles that declare cssVar tweaks, only into HTML documents,
-  and only into content that is already sandboxed without `allow-same-origin`.
-- The `see.json` manifest schema for agents is documented in `/llms.txt`.
+- A **bundle** is an upload containing a root `see.json` manifest. Into a bundle's served HTML the
+  content handler injects two things and nothing else: (1) a single static `<style>` block of `:root`
+  CSS custom properties for `css`-target tweaks (e.g. `<style>:root{ --color-primary:#D97757 }</style>`),
+  and (2) the minimal `see:*` **content runtime** `<script>` — a dependency-free, eval-free applier.
+  Plain (non-bundle) shares are served byte-for-byte untouched.
+- The runtime ships to **every** viewer (not preview-gated). This is sound because the content origin
+  sets no CSP and uploaded apps already run arbitrary JS under the sandbox, so a small trusted runtime
+  is not a new capability — and it holds **no storage and no secrets**.
+- **Cross-window bridge.** The sandboxed iframe has an *opaque* origin (no `allow-same-origin`), so it
+  cannot use localStorage and cannot be `postMessage`-targeted by a concrete origin. The runtime
+  therefore *initiates* a **MessageChannel** handshake: it posts `see:hello` to the viewer's concrete
+  origin (never a wildcard) and transfers a port; all further traffic is point-to-point over the port.
+  The viewer identifies its child by `event.source`, holds all state in viewer-origin localStorage,
+  and replays it over the port on each page handshake (cross-page persistence). It treats the one
+  inbound message (`see:picked`, from the inspector) as untrusted bounded text — never eval'd.
+  *Accepted limitation:* uploaded JS shares the opaque origin and the public share id, so the handshake
+  is spoofable and cannot be made unspoofable; acceptable because the bridge carries only cosmetic
+  overrides the page already applies to its own `:root`/DOM.
+- **Tweak targets.** A tweak drives `css` (the static `<style>` + a live inline `:root` var), `attr`
+  (a `data-*`/`aria-` attribute on a selector — names are restricted so no event-handler or URL
+  attribute can be set), or `class` (a class toggled on a selector). attr/class are applied live by
+  the runtime and snapshot-restored on reset.
+- **Shared includes.** `<see-include src="…">` elements in bundle HTML are expanded at serve time by
+  transcluding the referenced resource (recursive, depth/byte/cycle-bounded, path-escape-guarded).
+- Nothing executable is read or derived from the upload; uploaded scripts are never modified.
+- The `see.json` manifest schema and conventions for agents are documented in `/llms.txt`.
 
 #### Per-page tweak inheritance
 
