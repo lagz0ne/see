@@ -218,6 +218,7 @@ export function TweaksOverlay({
   onClose: () => void;
 }) {
   const [tweaks, setTweaks] = useState<ResolvedTweak[] | null>(null);
+  const [presets, setPresets] = useState<Record<string, Record<string, ControlValue>>>({});
   const [candidates, setCandidates] = useState<DiscoveredCandidate[]>([]);
   const [sharedCount, setSharedCount] = useState(0);
   const [discoverRevision, setDiscoverRevision] = useState(0);
@@ -230,7 +231,9 @@ export function TweaksOverlay({
     fetch(`/api/uploads/${uploadId}/tweaks${query}`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : { tweaks: [] }))
       .then((d) => {
-        if (!cancelled) setTweaks(Array.isArray(d.tweaks) ? d.tweaks : []);
+        if (cancelled) return;
+        setTweaks(Array.isArray(d.tweaks) ? d.tweaks : []);
+        setPresets(d.presets && typeof d.presets === "object" && !Array.isArray(d.presets) ? d.presets : {});
       })
       .catch(() => {
         if (!cancelled) setTweaks([]);
@@ -278,6 +281,41 @@ export function TweaksOverlay({
   // otherwise DiscoverSection re-seeds its selection and re-checks tokens the user just unchecked.
   const newCandidates = useMemo(() => candidates.filter((c) => !c.exposed), [candidates]);
 
+  const presetNames = useMemo(() => Object.keys(presets), [presets]);
+  const tweakById = useMemo(() => new Map((tweaks ?? []).map((t) => [t.id, t])), [tweaks]);
+  // The css string a preset entry resolves to, coerced by the tweak's kind so a value authored as
+  // "18" formats identically to a manual edit ("18px") — null when the id isn't a drivable tweak.
+  const presetCss = useCallback(
+    (id: string, value: ControlValue): string | null => {
+      const def = tweakById.get(id);
+      if (!def?.cssVar) return null;
+      return formatCssValue(def, parseControlValue(def, String(value)));
+    },
+    [tweakById],
+  );
+  // Apply a "Look": set every drivable referenced tweak's cssVar in bulk (each becomes a local
+  // override the visitor can still adjust). Unknown ids / tweaks without a cssVar are skipped.
+  const applyPreset = useCallback(
+    (values: Record<string, ControlValue>) => {
+      for (const [id, value] of Object.entries(values)) {
+        const def = tweakById.get(id);
+        const css = presetCss(id, value);
+        if (def?.cssVar && css !== null) setTweak(def.cssVar, css);
+      }
+    },
+    [tweakById, presetCss, setTweak],
+  );
+  // A Look reads as "active" when every drivable entry it sets currently matches the visitor's
+  // overrides — so after applying one (or hand-matching it) the button reflects that state.
+  const isPresetActive = useCallback(
+    (values: Record<string, ControlValue>): boolean => {
+      const entries = Object.entries(values).filter(([id]) => tweakById.get(id)?.cssVar);
+      if (entries.length === 0) return false;
+      return entries.every(([id, value]) => overrides[tweakById.get(id)!.cssVar!] === presetCss(id, value));
+    },
+    [tweakById, overrides, presetCss],
+  );
+
   return (
     <aside className="pointer-events-auto fixed top-20 right-3 bottom-3 z-40 flex w-80 max-w-[calc(100vw-1.5rem)] flex-col overflow-hidden rounded-lg border bg-card text-card-foreground">
       <header className="flex items-center justify-between gap-2 border-b px-3 py-2">
@@ -295,6 +333,27 @@ export function TweaksOverlay({
           <p className="font-mono text-xs text-muted-foreground">Loading…</p>
         ) : (
           <>
+            {presetNames.length > 0 ? (
+              <section className="flex flex-col gap-2">
+                <h3 className="font-mono text-[0.65rem] tracking-[0.12em] text-muted-foreground uppercase">Looks</h3>
+                <div className="flex flex-wrap gap-1.5">
+                  {presetNames.map((name) => {
+                    const active = isPresetActive(presets[name]);
+                    return (
+                      <Button
+                        key={name}
+                        variant={active ? "default" : "outline"}
+                        size="sm"
+                        aria-pressed={active}
+                        onClick={() => applyPreset(presets[name])}
+                      >
+                        {name}
+                      </Button>
+                    );
+                  })}
+                </div>
+              </section>
+            ) : null}
             {groups.map(([group, items]) => (
               <section key={group} className="flex flex-col gap-3">
                 {group ? (
@@ -318,7 +377,7 @@ export function TweaksOverlay({
               discoverRevision={discoverRevision}
               onExposed={() => setRefreshNonce((n) => n + 1)}
             />
-            {groups.length === 0 && newCandidates.length === 0 ? (
+            {groups.length === 0 && newCandidates.length === 0 && presetNames.length === 0 ? (
               <p className="text-sm text-muted-foreground">
                 No design tokens exposed, and none found in this share's CSS. Add{" "}
                 <span className="font-mono">tweaks</span> with a <span className="font-mono">cssVar</span> to{" "}

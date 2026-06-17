@@ -13,6 +13,8 @@ const MAX_TWEAK_STRING_VALUE_LENGTH = 2048;
 const MAX_EXPOSED_PAGES = 1000;
 const MAX_TWEAK_PAGES = 1000;
 const MAX_PAGE_PATH_LENGTH = 1024;
+const MAX_PRESETS = 50;
+const MAX_PRESET_NAME_LENGTH = 64;
 
 type TweakValue = string | number | boolean;
 
@@ -32,6 +34,7 @@ export type BundleManifest = {
   bar?: boolean;
   tweaks?: Record<string, ManifestTweak>;
   pages?: Record<string, { tweaks?: Record<string, PartialManifestTweak> }>;
+  presets?: Record<string, Record<string, TweakValue>>; // "Looks": named bundles of tweak values
 };
 
 function invalid(message: string): never {
@@ -88,7 +91,53 @@ export function parseManifest(text: string): BundleManifest {
     manifest.pages = parsePages(obj["pages"]);
   }
 
+  if ("presets" in obj && obj["presets"] !== null) {
+    manifest.presets = parsePresets(obj["presets"]);
+  }
+
   return manifest;
+}
+
+// A "preset" (a.k.a. "Look") is a named map of tweak id -> value. It is additive UI sugar: the viewer
+// overlay applies a preset's values in bulk as local overrides; nothing is server-applied, so preset
+// ids may reference any tweak (unknown ids simply no-op in the overlay). Validate shape + bounds only.
+function parsePresets(raw: unknown): Record<string, Record<string, TweakValue>> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    invalid("presets must be an object keyed by preset name");
+  }
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if (entries.length > MAX_PRESETS) {
+    invalid(`presets supports at most ${MAX_PRESETS} entries`);
+  }
+
+  const out: Record<string, Record<string, TweakValue>> = {};
+  for (const [name, value] of entries) {
+    if (name.length > MAX_PRESET_NAME_LENGTH) {
+      invalid(`preset "${name}" exceeds ${MAX_PRESET_NAME_LENGTH} characters`);
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      invalid(`preset "${name}" must be an object of tweak id -> value`);
+    }
+    const valueEntries = Object.entries(value as Record<string, unknown>);
+    if (valueEntries.length > MAX_TWEAKS) {
+      invalid(`preset "${name}" supports at most ${MAX_TWEAKS} values`);
+    }
+    const inner: Record<string, TweakValue> = {};
+    for (const [id, v] of valueEntries) {
+      if (id.length > MAX_TWEAK_KEY_LENGTH) {
+        invalid(`preset "${name}" tweak id "${id}" exceeds ${MAX_TWEAK_KEY_LENGTH} characters`);
+      }
+      if (typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") {
+        invalid(`preset "${name}" value for "${id}" must be a string, number, or boolean`);
+      }
+      if (typeof v === "string" && v.length > MAX_TWEAK_STRING_VALUE_LENGTH) {
+        invalid(`preset "${name}" value for "${id}" exceeds ${MAX_TWEAK_STRING_VALUE_LENGTH} characters`);
+      }
+      inner[id] = v;
+    }
+    out[name] = inner;
+  }
+  return out;
 }
 
 function parsePages(raw: unknown): Record<string, { tweaks?: Record<string, PartialManifestTweak> }> {
@@ -356,6 +405,12 @@ export function deriveBundleState(
   }
   if (Object.keys(pageTweakDefs).length > 0) {
     bundle.pageTweakDefs = pageTweakDefs;
+  }
+
+  // Presets ("Looks") are client-applied overlay sugar, so they pass through to the BundleState as-is
+  // (no page/tweak-existence validation — unknown ids no-op in the overlay).
+  if (manifest.presets && Object.keys(manifest.presets).length > 0) {
+    bundle.presets = manifest.presets;
   }
 
   return { workspace, bundle: Object.keys(bundle).length > 0 ? bundle : undefined };

@@ -286,6 +286,38 @@ describe("bundles", () => {
     expect(html).not.toContain("homepage");
   });
 
+  test("presets ('Looks') are validated, persisted, and returned by GET /tweaks", async () => {
+    const { app } = await testApp();
+    const see = manifest({
+      tweaks: {
+        primaryColor: { kind: "color", value: "#D97757", cssVar: "--color-primary", label: "Primary" },
+        fontSize: { kind: "number", value: 16, unit: "px", cssVar: "--font-size", label: "Font" },
+      },
+      presets: {
+        Dark: { primaryColor: "#0A0A0A", fontSize: 18 },
+        Bold: { primaryColor: "#FF3B30" },
+      },
+    });
+    const payload = await (await uploadFiles(app, [indexFile(), manifestFile(see)], { editToken: "pw" })).json();
+    expect(payload.kind).toBe("bundle");
+
+    const res = await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/tweaks`));
+    const data = await res.json();
+    expect(data.presets).toEqual({
+      Dark: { primaryColor: "#0A0A0A", fontSize: 18 },
+      Bold: { primaryColor: "#FF3B30" },
+    });
+  });
+
+  test("an invalid presets block is rejected on upload", async () => {
+    const { app } = await testApp();
+    const see = manifest({ presets: { Bad: [1, 2, 3] } });
+    const res = await uploadFiles(app, [indexFile(), manifestFile(see)], { editToken: "pw" });
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.code).toBe("invalid_manifest");
+  });
+
   test("a value-only page override inherits the shared cssVar and unit", async () => {
     const { app } = await testApp();
     const see = manifest({

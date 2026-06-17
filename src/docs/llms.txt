@@ -37,6 +37,7 @@ A **bundle** is the first-class way to ship an app to `see`: your static files (
 | `bar` | default visibility of the viewer bar (boolean) |
 | `tweaks` | named design knobs applied as static CSS custom properties — the **shared** defaults inherited by every page |
 | `pages` | optional per-page tweak overrides, keyed by page resource path (see below) |
+| `presets` | optional named "Looks" — bundles of tweak values the viewer can apply (see below) |
 
 **Static CSS-variable tweaks.** Each entry is `"<id>": { "kind": …, "value": …, "cssVar": "--…", "unit": "px"?, "label": …, "group": … }`.
 
@@ -57,6 +58,19 @@ Your CSS just consumes `var(--color-primary)` and the tweak works with no page c
 - Each `pages` key must be an existing HTML page (validated on upload/patch).
 
 Edit a shared value via pointer `/tweaks/<id>/value`; edit a page's own value via `/pages/<page-path>/tweaks/<id>/value`. These are **separate** surfaces — a shared edit never touches a page layer and vice versa. In a JSON Pointer, `/` inside a page path is escaped as `~1` (RFC 6901), e.g. `sub/page.html` → `/pages/sub~1page.html/tweaks/<id>/value`. The patch engine auto-creates missing parents, so these pointers work even before any `pages` node exists.
+
+### Presets ("Looks")
+
+Optional `presets` map — named bundles of tweak values, so one app can offer several curated faces. The viewer overlay shows a switcher; clicking a Look applies its values as the visitor's local overrides (they can still adjust afterward).
+
+```json
+"presets": {
+  "Dark": { "primaryColor": "#0A0A0A", "fontSize": 18 },
+  "Bold": { "primaryColor": "#FF3B30" }
+}
+```
+
+Each key is a Look name; each value maps tweak ids (from `tweaks`) to the value that Look sets. Use the **same value type as the tweak's `value`** (e.g. `18`, not `"18px"` — the unit is applied automatically). Only tweak ids backed by a `cssVar` are applied; others are silently ignored. Presets are applied **client-side only** — nothing is written to the server. To make a Look the published default, patch the tweak values in `see.json` directly.
 
 ### Editing a bundle = patching `see.json`
 
@@ -88,7 +102,7 @@ Author a fragment once and reference it from many pages so your output stays sma
 
 - `src` is a resource path relative to the share root. The server expands `<see-include>` at serve time for **bundle HTML only** — the raw stored file keeps the element; the served `/content/{id}/…` page shows the fragment. Editing a fragment bumps the revision, so every page that includes it re-renders and open viewers live-reload.
 - Fragments are HTML **fragments**, not whole documents (no `<html>/<head>/<body>`). They may nest other `<see-include>`s (bounded depth; cycles are ignored).
-- Always use an explicit close tag: `<see-include src="…"></see-include>`. Any fallback content between the tags is replaced on expansion.
+- Always use an explicit close tag: `<see-include src="…"></see-include>`. A self-closing `<see-include … />` is INVALID — the HTML parser treats it as unclosed, so the rest of the page becomes its content and is swallowed on expansion. Fallback content between the proper tags is replaced.
 - A missing, traversing (`../`), or oversized `src` expands to nothing — a bad reference never breaks the page. Vary one shared fragment per page with per-page tweaks (CSS vars) instead of cloning it.
 
 ---

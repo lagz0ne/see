@@ -27,6 +27,7 @@ export type TweakDef = {
 export type BundleState = {
   tweakDefs?: Record<string, TweakDef>;
   pageTweakDefs?: Record<string, Record<string, TweakDef>>; // page path -> tweak id -> control metadata
+  presets?: Record<string, Record<string, string | number | boolean>>; // preset name -> tweak id -> value ("Looks")
 };
 
 export type UploadMetadata = {
@@ -154,12 +155,35 @@ function parseBundleState(raw: unknown): BundleState | undefined {
     }
   }
 
-  if (tweakDefs === undefined && pageTweakDefs === undefined) {
+  let presets: Record<string, Record<string, string | number | boolean>> | undefined;
+  if (obj["presets"] && typeof obj["presets"] === "object" && !Array.isArray(obj["presets"])) {
+    const out: Record<string, Record<string, string | number | boolean>> = {};
+    for (const [name, value] of Object.entries(obj["presets"] as Record<string, unknown>)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        continue;
+      }
+      const inner: Record<string, string | number | boolean> = {};
+      for (const [id, v] of Object.entries(value as Record<string, unknown>)) {
+        if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+          inner[id] = v;
+        }
+      }
+      if (Object.keys(inner).length > 0) {
+        out[name] = inner;
+      }
+    }
+    if (Object.keys(out).length > 0) {
+      presets = out;
+    }
+  }
+
+  if (tweakDefs === undefined && pageTweakDefs === undefined && presets === undefined) {
     return undefined;
   }
   return {
     ...(tweakDefs ? { tweakDefs } : {}),
     ...(pageTweakDefs ? { pageTweakDefs } : {}),
+    ...(presets ? { presets } : {}),
   };
 }
 

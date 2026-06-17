@@ -441,7 +441,13 @@ async function handleGetTweaks(id: string, page: string | null, repo: UploadsRep
     .slice()
     .sort((a, b) => (a.group ?? "").localeCompare(b.group ?? "") || a.id.localeCompare(b.id));
 
-  return jsonResponse({ id: upload.id, revision: uploadRevision(upload), page: pagePath, tweaks });
+  return jsonResponse({
+    id: upload.id,
+    revision: uploadRevision(upload),
+    page: pagePath,
+    tweaks,
+    presets: bundle.presets ?? {}, // share-wide "Looks": name -> { tweak id -> value }
+  });
 }
 
 // The resource path the content route serves for `page` (or the share root when page is empty),

@@ -14,12 +14,14 @@ describe("normalizeIncludePath", () => {
     expect(normalizeIncludePath("  shared/nav.html  ")).toBe("shared/nav.html");
   });
 
-  test("rejects empty and any traversal", () => {
+  test("rejects empty and any traversal (including backslash-encoded)", () => {
     expect(normalizeIncludePath("")).toBeNull();
     expect(normalizeIncludePath("   ")).toBeNull();
     expect(normalizeIncludePath("/")).toBeNull();
     expect(normalizeIncludePath("../secret.html")).toBeNull();
     expect(normalizeIncludePath("shared/../../etc/passwd")).toBeNull();
+    expect(normalizeIncludePath("..\\secret.html")).toBeNull();
+    expect(normalizeIncludePath("shared\\..\\..\\etc")).toBeNull();
   });
 });
 
@@ -86,6 +88,29 @@ describe("expandIncludes", () => {
     const html = `<see-include src="x.html"></see-include><see-include src="x.html"></see-include>`;
     const out = await expandIncludes(html, loaderFor({ "x.html": "<x/>" }));
     expect(out).toBe("<x/><x/>");
+  });
+
+  test("strips a no-src / empty-src include even when it is the only one", async () => {
+    const html = `<div><see-include></see-include><see-include src="">x</see-include><p>after</p></div>`;
+    const out = await expandIncludes(html, loaderFor({}));
+    expect(out).toBe(`<div><p>after</p></div>`);
+  });
+
+  test("expands case-insensitively (uppercase tag is not skipped by the fast path)", async () => {
+    const html = `<div><SEE-INCLUDE src="a.html"></SEE-INCLUDE></div>`;
+    const out = await expandIncludes(html, loaderFor({ "a.html": "<a>up</a>" }));
+    expect(out).toContain("<a>up</a>");
+    expect(out.toLowerCase()).not.toContain("see-include");
+  });
+
+  test("bounds total emitted bytes so fragment reuse can't blow up the page", async () => {
+    const big = "Z" + "x".repeat(600 * 1024); // ~600KB; ~6-7 fit under the 4MB output budget
+    const refs = Array.from({ length: 30 }, () => `<see-include src="big.html"></see-include>`).join("");
+    const out = await expandIncludes(`<body>${refs}</body>`, loaderFor({ "big.html": big }));
+    const placed = (out.match(/Z/g) || []).length;
+    expect(placed).toBeGreaterThan(0);
+    expect(placed).toBeLessThan(30); // budget dropped the excess placements
+    expect(out.length).toBeLessThan(30 * big.length); // total output is bounded, not multiplied out
   });
 
   test("bounds total expansion depth", async () => {
