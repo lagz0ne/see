@@ -25,7 +25,7 @@ export type ContentRuntimeConfig = {
 // into the content ETag for injected bundle HTML (see app.ts contentEtag), so bumping it invalidates
 // pages cached before the change instead of letting them 304 to a stale body. (Viewer-origin changes
 // are handled automatically: the injected ETag also hashes the viewer origin baked into the runtime.)
-export const CONTENT_RUNTIME_VERSION = 3;
+export const CONTENT_RUNTIME_VERSION = 4;
 
 // The runtime body as an inline-evaluated function expression. Dependency-free and ES5-ish so it
 // runs inside any uploaded app with no build step. `cfg` is supplied by the IIFE call below.
@@ -41,6 +41,65 @@ const RUNTIME_BODY = `function (cfg) {
     root.style.setProperty(name, String(value).slice(0, MAX));
   }
   function clearVar(name) { if (typeof name === "string") root.style.removeProperty(name); }
+
+  // --- Tweak ops. A tweak applies to one of three targets: "css" (an inline :root var, layered over
+  // the server's static <style>), "attr" (a data-*/aria- attribute on selected elements), or "class"
+  // (a class toggled on selected elements). attr/class have no static default, so before first
+  // applying one we snapshot the elements' original state and restore it on reset/clear.
+  function truthy(v) { return v !== "" && v !== "0" && v !== "false" && v !== false; }
+  // Defense in depth — mirror of bundle.ts SAFE_ATTR_NAME / SAFE_CLASS_NAME (keep in sync). Guards
+  // against a tampered persisted op even though the server already validated these on write.
+  function safeAttr(n) { return /^(data-|aria-)[a-zA-Z0-9:_-]+$/.test(n); }
+  function safeClass(n) { return /^[a-zA-Z_-][a-zA-Z0-9_-]*$/.test(n); }
+  function query(sel) { try { return document.querySelectorAll(sel); } catch (e) { return []; } }
+
+  var snaps = {}; // opKey -> { t, name, items: [{ el, had, prev }] }
+  function snapKey(op) { return JSON.stringify([op.t, op.selector, op.name]); }
+  function ensureSnap(op, els) {
+    var k = snapKey(op);
+    if (snaps[k]) return;
+    var items = [];
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (op.t === "attr") items.push({ el: el, had: el.hasAttribute(op.name), prev: el.getAttribute(op.name) });
+      else items.push({ el: el, had: el.classList.contains(op.name) });
+    }
+    snaps[k] = { t: op.t, name: op.name, items: items };
+  }
+  function restoreSnap(op) {
+    var k = snapKey(op), s = snaps[k];
+    if (!s) return;
+    for (var i = 0; i < s.items.length; i++) {
+      var it = s.items[i];
+      if (s.t === "attr") { if (it.had) it.el.setAttribute(s.name, it.prev); else it.el.removeAttribute(s.name); }
+      else it.el.classList.toggle(s.name, it.had);
+    }
+    delete snaps[k];
+  }
+  function applyOp(op) {
+    if (!op || typeof op !== "object") return;
+    if (op.t === "css") { setVar(op.cssVar, op.v); return; }
+    if (typeof op.selector !== "string" || typeof op.name !== "string") return;
+    var els = query(op.selector), i;
+    if (op.t === "attr") {
+      if (!safeAttr(op.name)) return;
+      ensureSnap(op, els);
+      for (i = 0; i < els.length; i++) {
+        if (op.v === "") els[i].removeAttribute(op.name);
+        else els[i].setAttribute(op.name, String(op.v).slice(0, MAX));
+      }
+    } else if (op.t === "class") {
+      if (!safeClass(op.name)) return;
+      ensureSnap(op, els);
+      var on = truthy(op.v);
+      for (i = 0; i < els.length; i++) els[i].classList.toggle(op.name, on);
+    }
+  }
+  function undoOp(op) {
+    if (!op || typeof op !== "object") return;
+    if (op.t === "css") clearVar(op.cssVar);
+    else restoreSnap(op);
+  }
 
   var channel = new MessageChannel();
 
@@ -120,14 +179,15 @@ const RUNTIME_BODY = `function (cfg) {
   channel.port1.onmessage = function (e) {
     var m = e.data;
     if (!m || typeof m !== "object") return;
-    if (m.type === "see:state" && m.vars && typeof m.vars === "object") {
-      for (var k in m.vars) { if (Object.prototype.hasOwnProperty.call(m.vars, k)) setVar(k, m.vars[k]); }
+    if (m.type === "see:state" && m.ops && m.ops.length) {
+      // Per-op try/catch so one malformed op can't abort the whole replay batch (the rest must apply).
+      for (var i = 0; i < m.ops.length; i++) { try { applyOp(m.ops[i]); } catch (e) {} }
     } else if (m.type === "see:tweak") {
-      setVar(m.cssVar, m.value);
+      try { applyOp(m.op); } catch (e) {}
     } else if (m.type === "see:reset") {
-      clearVar(m.cssVar);
-    } else if (m.type === "see:clear" && m.cssVars && m.cssVars.length) {
-      for (var i = 0; i < m.cssVars.length; i++) clearVar(m.cssVars[i]);
+      try { undoOp(m.op); } catch (e) {}
+    } else if (m.type === "see:clear" && m.ops && m.ops.length) {
+      for (var j = 0; j < m.ops.length; j++) { try { undoOp(m.ops[j]); } catch (e) {} }
     } else if (m.type === "see:inspect") {
       setInspect(m.on);
     }

@@ -318,6 +318,58 @@ describe("bundles", () => {
     expect(data.code).toBe("invalid_manifest");
   });
 
+  test("attr/class tweak targets validate and surface via GET /tweaks", async () => {
+    const { app } = await testApp();
+    const see = manifest({
+      tweaks: {
+        theme: {
+          kind: "select", value: "light", options: ["light", "dark"],
+          target: "attr", selector: "html", attr: "data-theme", label: "Theme",
+        },
+        compact: { kind: "toggle", value: false, target: "class", selector: "body", class: "compact", label: "Compact" },
+      },
+    });
+    const payload = await (await uploadFiles(app, [indexFile(), manifestFile(see)], { editToken: "pw" })).json();
+    expect(payload.kind).toBe("bundle");
+
+    const res = await app.fetch(new Request(`http://share.test/api/uploads/${payload.id}/tweaks`));
+    const data = await res.json();
+    const byId: Record<string, Record<string, unknown>> = Object.fromEntries(
+      data.tweaks.map((t: { id: string }) => [t.id, t]),
+    );
+    expect(byId.theme).toMatchObject({ target: "attr", selector: "html", attr: "data-theme" });
+    expect(byId.compact).toMatchObject({ target: "class", selector: "body", class: "compact" });
+  });
+
+  test("rejects an unsafe attr target (event-handler / non data-aria attribute)", async () => {
+    const { app } = await testApp();
+    const see = manifest({
+      tweaks: { x: { kind: "text", value: "y", target: "attr", selector: "a", attr: "onclick", label: "X" } },
+    });
+    const res = await uploadFiles(app, [indexFile(), manifestFile(see)], { editToken: "pw" });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("invalid_manifest");
+  });
+
+  test("rejects an attr target missing its selector", async () => {
+    const { app } = await testApp();
+    const see = manifest({
+      tweaks: { x: { kind: "text", value: "y", target: "attr", attr: "data-x", label: "X" } },
+    });
+    const res = await uploadFiles(app, [indexFile(), manifestFile(see)], { editToken: "pw" });
+    expect(res.status).toBe(400);
+  });
+
+  test("rejects a tweak that sets both a cssVar and an attr/class target", async () => {
+    const { app } = await testApp();
+    const see = manifest({
+      tweaks: { x: { value: "y", cssVar: "--x", target: "attr", selector: "a", attr: "data-x", label: "X" } },
+    });
+    const res = await uploadFiles(app, [indexFile(), manifestFile(see)], { editToken: "pw" });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("invalid_manifest");
+  });
+
   test("a value-only page override inherits the shared cssVar and unit", async () => {
     const { app } = await testApp();
     const see = manifest({

@@ -39,11 +39,13 @@ A **bundle** is the first-class way to ship an app to `see`: your static files (
 | `pages` | optional per-page tweak overrides, keyed by page resource path (see below) |
 | `presets` | optional named "Looks" — bundles of tweak values the viewer can apply (see below) |
 
-**Static CSS-variable tweaks.** Each entry is `"<id>": { "kind": …, "value": …, "cssVar": "--…", "unit": "px"?, "label": …, "group": … }`.
+**Tweaks = a live controller.** Each entry is `"<id>": { "kind": …, "value": …, "label": …, "group": …, <target fields> }`. The `target` decides how the value is applied (default `"css"` when a `cssVar` is set):
 
-- **Only tweaks with a `cssVar` take effect.** For each, the content handler injects a single static `<style>:root { --cssVar: value; }</style>` into served HTML — zero page JS, no SDK. Tweaks without `cssVar` are ignored.
-- `kind` is `"toggle"` | `"number"` | `"color"` | `"text"` | `"select"` (inferred from `value` type if omitted). Use a `"text"` tweak when the CSS value is a string, e.g. `--badge-display: inline`.
-- Other optional fields: `label`, `group`, `min`, `max`, `step`, `unit`, `options` (for `select`).
+- **`css`** — injects a static `<style>:root{ --cssVar: value }</style>` into served HTML (zero page JS; works even outside the viewer). Fields: `"cssVar": "--…"`, optional `"unit": "px"`. Use a `"text"` kind when the value is a string, e.g. `--badge-display: inline`.
+- **`attr`** — the viewer runtime sets an attribute on elements matching a selector: `"target": "attr", "selector": "html", "attr": "data-theme"` sets `data-theme="<value>"` (empty value removes it). Attribute names are restricted to `data-*` / `aria-*`.
+- **`class`** — the runtime toggles a class on matching elements (pair with `kind: "toggle"`): `"target": "class", "selector": "body", "class": "compact"`.
+- `kind` is `"toggle"` | `"number"` | `"color"` | `"text"` | `"select"` (inferred from `value` type if omitted). Other optional fields: `label`, `group`, `min`, `max`, `step`, `unit`, `options` (for `select`).
+- **attr/class apply only in the managed viewer** (they need the runtime) and have NO static default — author the element's default state in your markup and make the control's `value` match it. css tweaks work everywhere. For anything more complex, write your own JS — tweaks are a convenience, not a cage.
 
 Your CSS just consumes `var(--color-primary)` and the tweak works with no page code.
 

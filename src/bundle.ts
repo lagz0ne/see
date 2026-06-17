@@ -15,6 +15,13 @@ const MAX_TWEAK_PAGES = 1000;
 const MAX_PAGE_PATH_LENGTH = 1024;
 const MAX_PRESETS = 50;
 const MAX_PRESET_NAME_LENGTH = 64;
+const MAX_SELECTOR_LENGTH = 512;
+const ALLOWED_TWEAK_TARGETS = ["css", "attr", "class"];
+// attr targets are restricted to data-*/aria-* names so a tweak can never set an event handler
+// (on*), style, src/href, or other script/URL-bearing attribute on the content origin.
+// (Mirrored in content-runtime.ts safeAttr/safeClass for defense in depth — keep in sync.)
+const SAFE_ATTR_NAME = /^(data-|aria-)[a-zA-Z0-9:_-]+$/;
+const SAFE_CLASS_NAME = /^[a-zA-Z_-][a-zA-Z0-9_-]*$/;
 
 type TweakValue = string | number | boolean;
 
@@ -211,27 +218,17 @@ function parseTweaks(raw: unknown): Record<string, ManifestTweak> {
   return out;
 }
 
-function parseTweak(key: string, raw: Record<string, unknown>): ManifestTweak {
-  if (!("value" in raw)) {
-    invalid(`tweak "${key}" is missing a "value"`);
-  }
-  const value = raw["value"];
-  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
-    invalid(`tweak "${key}" value must be a string, number, or boolean`);
-  }
-  if (typeof value === "string" && value.length > MAX_TWEAK_STRING_VALUE_LENGTH) {
-    invalid(`tweak "${key}" value exceeds ${MAX_TWEAK_STRING_VALUE_LENGTH} characters`);
-  }
-
-  const tweak: ManifestTweak = { value };
-
+// Validate + copy the shared control-metadata fields (everything but `value`) onto a tweak. Used by
+// both the full and partial tweak parsers so the schema — including the attr/class interaction
+// targets and their safety constraints — stays defined in exactly one place.
+function parseControlFields(key: string, raw: Record<string, unknown>, tweak: TweakDef): void {
   if ("kind" in raw && raw["kind"] !== undefined) {
     if (typeof raw["kind"] !== "string" || !ALLOWED_TWEAK_KINDS.includes(raw["kind"])) {
       invalid(`tweak "${key}" kind must be one of: ${ALLOWED_TWEAK_KINDS.join(", ")}`);
     }
     tweak.kind = raw["kind"];
   }
-  for (const field of ["label", "group", "unit", "cssVar"] as const) {
+  for (const field of ["label", "group", "unit", "cssVar", "selector", "attr", "class"] as const) {
     if (field in raw && raw[field] !== undefined) {
       if (typeof raw[field] !== "string") {
         invalid(`tweak "${key}" ${field} must be a string`);
@@ -253,6 +250,51 @@ function parseTweak(key: string, raw: Record<string, unknown>): ManifestTweak {
     }
     tweak.options = raw["options"] as string[];
   }
+  if ("target" in raw && raw["target"] !== undefined) {
+    if (typeof raw["target"] !== "string" || !ALLOWED_TWEAK_TARGETS.includes(raw["target"])) {
+      invalid(`tweak "${key}" target must be one of: ${ALLOWED_TWEAK_TARGETS.join(", ")}`);
+    }
+    tweak.target = raw["target"];
+  }
+  // Interaction-target constraints: bound the selector, and restrict attribute/class names so a tweak
+  // can only ever set a safe data-*/aria- attribute or a plain class — never an event handler or URL.
+  if (tweak.selector !== undefined && tweak.selector.length > MAX_SELECTOR_LENGTH) {
+    invalid(`tweak "${key}" selector exceeds ${MAX_SELECTOR_LENGTH} characters`);
+  }
+  if (tweak.attr !== undefined && !SAFE_ATTR_NAME.test(tweak.attr)) {
+    invalid(`tweak "${key}" attr must be a data-* or aria-* attribute name`);
+  }
+  if (tweak.class !== undefined && !SAFE_CLASS_NAME.test(tweak.class)) {
+    invalid(`tweak "${key}" class must be a valid CSS class name`);
+  }
+  if (tweak.target === "attr" && (!tweak.selector || !tweak.attr)) {
+    invalid(`tweak "${key}" with target "attr" requires "selector" and "attr"`);
+  }
+  if (tweak.target === "class" && (!tweak.selector || !tweak.class)) {
+    invalid(`tweak "${key}" with target "class" requires "selector" and "class"`);
+  }
+  // A tweak drives exactly one target. A cssVar with an attr/class target would apply via BOTH the
+  // static <style> and the DOM op — reject it rather than silently double-applying.
+  if (tweak.cssVar !== undefined && tweak.target !== undefined && tweak.target !== "css") {
+    invalid(`tweak "${key}" has a cssVar but target "${tweak.target}" — use one of cssVar (css) or selector + attr/class`);
+  }
+}
+
+function parseTweak(key: string, raw: Record<string, unknown>): ManifestTweak {
+  if (!("value" in raw)) {
+    invalid(`tweak "${key}" is missing a "value"`);
+  }
+  const value = raw["value"];
+  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+    invalid(`tweak "${key}" value must be a string, number, or boolean`);
+  }
+  if (typeof value === "string" && value.length > MAX_TWEAK_STRING_VALUE_LENGTH) {
+    invalid(`tweak "${key}" value exceeds ${MAX_TWEAK_STRING_VALUE_LENGTH} characters`);
+  }
+
+  const tweak: ManifestTweak = { value };
+
+  parseControlFields(key, raw, tweak);
 
   return tweak;
 }
@@ -273,34 +315,7 @@ function parsePartialTweak(key: string, raw: Record<string, unknown>): PartialMa
     tweak.value = value;
   }
 
-  if ("kind" in raw && raw["kind"] !== undefined) {
-    if (typeof raw["kind"] !== "string" || !ALLOWED_TWEAK_KINDS.includes(raw["kind"])) {
-      invalid(`tweak "${key}" kind must be one of: ${ALLOWED_TWEAK_KINDS.join(", ")}`);
-    }
-    tweak.kind = raw["kind"];
-  }
-  for (const field of ["label", "group", "unit", "cssVar"] as const) {
-    if (field in raw && raw[field] !== undefined) {
-      if (typeof raw[field] !== "string") {
-        invalid(`tweak "${key}" ${field} must be a string`);
-      }
-      tweak[field] = raw[field] as string;
-    }
-  }
-  for (const field of ["min", "max", "step"] as const) {
-    if (field in raw && raw[field] !== undefined) {
-      if (typeof raw[field] !== "number" || !Number.isFinite(raw[field])) {
-        invalid(`tweak "${key}" ${field} must be a finite number`);
-      }
-      tweak[field] = raw[field] as number;
-    }
-  }
-  if ("options" in raw && raw["options"] !== undefined) {
-    if (!Array.isArray(raw["options"]) || !raw["options"].every((o) => typeof o === "string")) {
-      invalid(`tweak "${key}" options must be an array of strings`);
-    }
-    tweak.options = raw["options"] as string[];
-  }
+  parseControlFields(key, raw, tweak);
 
   if (tweak.value === undefined && Object.keys(tweak).length === 0) {
     invalid(`tweak "${key}" must define at least a value or one control field`);

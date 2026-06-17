@@ -18,8 +18,14 @@ export type TweakDef = {
   max?: number;
   step?: number;
   unit?: string;
-  cssVar?: string;    // CSS custom property the SDK sets automatically
+  cssVar?: string;    // CSS custom property the runtime sets (target: "css")
   options?: string[]; // for kind: "select"
+  // Interaction targets (Pillar A). "css" (default, when cssVar is present) injects a static
+  // :root var; "attr"/"class" are applied live by the runtime to elements matching `selector`.
+  target?: string;    // "css" | "attr" | "class"
+  selector?: string;  // for attr/class: CSS selector of the elements to drive
+  attr?: string;      // for target:"attr": the (data-*/aria-*) attribute name to set
+  class?: string;     // for target:"class": the class name to toggle
 };
 
 // Manifest-derived extras the HTML injector forwards to the SDK for a bundle. Kept
@@ -200,6 +206,10 @@ function sanitizeTweakDef(raw: Record<string, unknown>): TweakDef {
   if (Array.isArray(raw["options"]) && raw["options"].every((o) => typeof o === "string")) {
     def.options = raw["options"] as string[];
   }
+  if (typeof raw["target"] === "string") def.target = raw["target"];
+  if (typeof raw["selector"] === "string") def.selector = raw["selector"];
+  if (typeof raw["attr"] === "string") def.attr = raw["attr"];
+  if (typeof raw["class"] === "string") def.class = raw["class"];
   return def;
 }
 

@@ -101,9 +101,11 @@ runtime state and its lifecycle** — this is a load-bearing role, not just UI:
 ## Pillars
 
 - **A · Tweaks = a declarative interaction layer.** A tweak declares a target the injected
-  runtime applies: `css` (style — today's static path), `attr` / `class` (DOM state), `store`
-  (a localStorage key, reflected to the DOM on every page load → cross-page persistence). The LLM
-  may always write raw JS instead; the declarative path is convenience, never a cage.
+  runtime applies: `css` (style — static `<style>`), `attr` / `class` (DOM state, applied live). The
+  LLM may always write raw JS instead; the declarative path is convenience, never a cage.
+  (**`store` dropped 2026-06-17:** the content iframe's opaque origin has no localStorage, and the
+  viewer-origin override replay already gives cross-page persistence for every target — see the
+  `src/content-runtime.ts` header.)
 - **B · Shared material (token economy).** `shared/` convention + `<see-include src="…">`
   serve-time transclusion via HTMLRewriter. The LLM writes a fragment once and references it from
   many pages, so its output stays small. Per-page tweaks vary the shared fragment.
@@ -114,7 +116,7 @@ runtime state and its lifecycle** — this is a load-bearing role, not just UI:
   content carrying `data-see="…"` anchors, with a DOM-path fallback.
 - **D · Rules, not a pipeline.** The platform is conventions + serve-time composition, so the LLM
   authors in any order. `see.json` is the rule sheet; conventions are `shared/`, `data-see`,
-  `var(--token)`, `store:"key"`. The rules are fed to the workflow via `src/docs/llms.txt`.
+  `var(--token)`, and tweak targets (`css`/`attr`/`class`). The rules are fed to the workflow via `src/docs/llms.txt`.
 - **E · Presets / "Looks".** A `presets` map in `see.json` (additive) + an overlay switcher: one
   app, multiple curated faces. Experiments live in localStorage; the LLM patches to make one the
   default.
@@ -127,21 +129,22 @@ runtime state and its lifecycle** — this is a load-bearing role, not just UI:
   every bundle's served HTML (port handshake to the viewer's concrete origin; thin applier, no
   storage); `css` target; injected-HTML ETag versioned by runtime + viewer origin; plain shares
   untouched.
-- [ ] **Phase 1b — Viewer half + targets.** Viewer handshake (identify child by `event.source`),
+- [x] **Phase 1b — Viewer half + targets.** Viewer handshake (identify child by `event.source`),
   per-share state in viewer-origin localStorage, `see:state` on each handshake, Clear-storage / data
-  lifecycle; expand tweak targets to `attr`/`class`/`store`. Lands with the overlay (Phase 2).
-- [ ] **Phase 2 — Surface.** `GET /api/uploads/{id}/tweaks?page=` (resolved defs+values); generalized
+  lifecycle; tweak targets `css`/`attr`/`class` (op protocol + snapshot undo; `store` dropped —
+  opaque origin has no localStorage).
+- [x] **Phase 2 — Surface.** `GET /api/uploads/{id}/tweaks?page=` (resolved defs+values); generalized
   tweak schema in `bundle.ts` + `upload-metadata.ts` + `llms.txt`; `TweaksOverlay` Blueprint
-  instrument (grouped, per-kind widgets, live drag, reset, inherited/overridden badges, page-aware,
-  search); CSS auto-discovery (scan `:root` custom props + `var()`, infer kind/range/group/label,
-  one-click expose writing `see.json` via patch) + empty-state; bar toggle + viewer-handshake wiring.
-- [ ] **Phase 3 — Review loop (product).** Inspector runtime (ships with the content runtime); comment composer;
+  instrument (grouped, per-kind widgets, live drag, reset, inherited/overridden badges, page-aware);
+  CSS auto-discovery (scan `:root` custom props, infer kind/range/group/label, one-click expose
+  writing `see.json` via patch) + empty-state; bar toggle + viewer-handshake wiring.
+- [x] **Phase 3 — Review loop (product).** Inspector runtime (ships with the content runtime); comment composer;
   patch-vocab-keyed clipboard payload; `data-see` convention documented in `llms.txt`.
-- [ ] **Phase 4 — Compose.** `shared/` + `<see-include>` transclusion; `presets`/Looks + switcher.
+- [x] **Phase 4 — Compose.** `shared/` + `<see-include>` transclusion; `presets`/Looks + switcher.
 - [ ] **Close-out.** Docs (spec security contract for the all-viewers runtime, AGENTS.md, llms.txt,
   design.md if new tokens); tests (parse/validate targets, page-over-shared, include expansion,
   endpoint, bridge origin-check); bump `ASSET_VERSION` in `src/pages.ts`; green
-  `bun run typecheck && bun run build:client && bun test` + a clean Codex review.
+  `bun run typecheck && bun run build:client && bun test`.
 
 ## Done criteria
 

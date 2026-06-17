@@ -40,6 +40,19 @@ describe("content runtime", () => {
     expect(script).toContain("see:clear");
   });
 
+  test("applies tweak ops by target (css var, attr, class) and can undo them", () => {
+    expect(script).toContain("applyOp");
+    expect(script).toContain("undoOp");
+    // css → inline var; attr → setAttribute (data-*/aria- guarded); class → classList.toggle.
+    expect(script).toContain("setProperty");
+    expect(script).toContain("setAttribute");
+    expect(script).toContain("classList.toggle");
+    // attr names are restricted to data-*/aria- in the runtime too (defense in depth).
+    expect(script).toContain("data-|aria-");
+    // Undo restores snapshotted attr/class state; css clears the inline var.
+    expect(script).toContain("removeProperty");
+  });
+
   test("ships an inspector: see:inspect drives it, picks report see:picked over the port", () => {
     // Inbound command + outbound report are both part of the point-to-point port protocol.
     expect(script).toContain("see:inspect");

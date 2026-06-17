@@ -21,6 +21,10 @@ type ResolvedTweak = {
   unit?: string;
   cssVar?: string;
   options?: string[];
+  target?: string; // "css" | "attr" | "class"
+  selector?: string;
+  attr?: string;
+  class?: string;
   value: string | number | boolean | null;
   valueSource: "page" | "shared" | null;
 };
@@ -43,10 +47,40 @@ type DiscoveredCandidate = {
 
 type ControlValue = string | number | boolean;
 
-// localStorage map is cssVar -> the FORMATTED css string the runtime applies verbatim (e.g. "20px",
-// "1", "#0A84FF"). Keeping the runtime currency here means see:state can be replayed as-is on every
-// page handshake.
-type Overrides = Record<string, string>;
+// A runtime op the bridge persists + replays: how a tweak's current value is applied inside the
+// iframe. css → an inline :root var (layered over the server's static <style>); attr/class → a DOM
+// mutation on `selector`. `v` is the FORMATTED value the runtime applies verbatim ("20px", "1", …).
+type AppliedOp =
+  | { t: "css"; v: string; cssVar: string }
+  | { t: "attr"; v: string; selector: string; name: string }
+  | { t: "class"; v: string; selector: string; name: string };
+
+// localStorage map is tweak id -> the op to apply. Keyed by id (not cssVar) so attr/class tweaks,
+// which have no cssVar, persist too; see:state replays the ops as-is on every page handshake.
+type Overrides = Record<string, AppliedOp>;
+
+// The runtime op a tweak's formatted value resolves to, or null when the tweak isn't drivable (no
+// css/attr/class target). Mirrors the runtime applier + the server's tweak schema; `target` defaults
+// to "css" when a cssVar is present.
+function opFor(tweak: ResolvedTweak, v: string): AppliedOp | null {
+  const target = tweak.target ?? (tweak.cssVar ? "css" : null);
+  if (target === "css" && tweak.cssVar) return { t: "css", v, cssVar: tweak.cssVar };
+  if (target === "attr" && tweak.selector && tweak.attr) return { t: "attr", v, selector: tweak.selector, name: tweak.attr };
+  if (target === "class" && tweak.selector && tweak.class) return { t: "class", v, selector: tweak.selector, name: tweak.class };
+  return null;
+}
+
+// Validate a persisted value back into an AppliedOp (localStorage is untrusted/older-format tolerant).
+function asAppliedOp(value: unknown): AppliedOp | null {
+  if (!value || typeof value !== "object") return null;
+  const o = value as Record<string, unknown>;
+  if (typeof o.v !== "string") return null;
+  if (o.t === "css" && typeof o.cssVar === "string") return { t: "css", v: o.v, cssVar: o.cssVar };
+  if ((o.t === "attr" || o.t === "class") && typeof o.selector === "string" && typeof o.name === "string") {
+    return { t: o.t, v: o.v, selector: o.selector, name: o.name };
+  }
+  return null;
+}
 
 const STORE_PREFIX = "see.tweaks.";
 // Mirrors the server's per-set tweak cap (src/bundle.ts) — exposing must not exceed it or the patch
@@ -59,7 +93,9 @@ function readOverrides(key: string): Overrides {
     if (!parsed || typeof parsed !== "object") return {};
     const out: Overrides = {};
     for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof v === "string") out[k] = v;
+      if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
+      const op = asAppliedOp(v);
+      if (op) out[k] = op;
     }
     return out;
   } catch {
@@ -153,7 +189,7 @@ export function useTweakBridge(uploadId: string, iframeRef: RefObject<HTMLIFrame
       if (typeof data.path === "string") setRuntimePath(data.path);
       setPicked(null); // a fresh page → drop any stale pick from the previous one
       // Replay the visitor's overrides + restore inspect mode so both survive in-iframe navigation.
-      port.postMessage({ type: "see:state", vars: overridesRef.current });
+      port.postMessage({ type: "see:state", ops: Object.values(overridesRef.current) });
       port.postMessage({ type: "see:inspect", on: inspectRef.current });
     }
     window.addEventListener("message", onMessage);
@@ -169,26 +205,26 @@ export function useTweakBridge(uploadId: string, iframeRef: RefObject<HTMLIFrame
   );
 
   const setTweak = useCallback(
-    (cssVar: string, cssValue: string) => {
-      portRef.current?.postMessage({ type: "see:tweak", cssVar, value: cssValue });
-      persist({ ...overridesRef.current, [cssVar]: cssValue });
+    (id: string, op: AppliedOp) => {
+      portRef.current?.postMessage({ type: "see:tweak", op });
+      persist({ ...overridesRef.current, [id]: op });
     },
     [persist],
   );
 
   const resetTweak = useCallback(
-    (cssVar: string) => {
-      portRef.current?.postMessage({ type: "see:reset", cssVar });
+    (id: string, op: AppliedOp) => {
+      portRef.current?.postMessage({ type: "see:reset", op });
       const next = { ...overridesRef.current };
-      delete next[cssVar];
+      delete next[id];
       persist(next);
     },
     [persist],
   );
 
   const clearAll = useCallback(() => {
-    const keys = Object.keys(overridesRef.current);
-    if (keys.length > 0) portRef.current?.postMessage({ type: "see:clear", cssVars: keys });
+    const ops = Object.values(overridesRef.current);
+    if (ops.length > 0) portRef.current?.postMessage({ type: "see:clear", ops });
     persist({});
   }, [persist]);
 
@@ -264,9 +300,9 @@ export function TweaksOverlay({
     };
   }, [uploadId, revision, refreshNonce]);
 
-  // Only tweaks with a cssVar are drivable by the runtime; group them for a spec-sheet layout.
+  // Only tweaks with a valid css/attr/class target are drivable by the runtime; group for a layout.
   const groups = useMemo(() => {
-    const drivable = (tweaks ?? []).filter((t) => t.cssVar && t.cssVar.length > 0);
+    const drivable = (tweaks ?? []).filter((t) => opFor(t, "") !== null);
     const byGroup = new Map<string, ResolvedTweak[]>();
     for (const t of drivable) {
       const g = t.group ?? "";
@@ -283,37 +319,39 @@ export function TweaksOverlay({
 
   const presetNames = useMemo(() => Object.keys(presets), [presets]);
   const tweakById = useMemo(() => new Map((tweaks ?? []).map((t) => [t.id, t])), [tweaks]);
-  // The css string a preset entry resolves to, coerced by the tweak's kind so a value authored as
+  // The formatted value a preset entry resolves to, coerced by the tweak's kind so a value authored as
   // "18" formats identically to a manual edit ("18px") — null when the id isn't a drivable tweak.
-  const presetCss = useCallback(
+  const presetValue = useCallback(
     (id: string, value: ControlValue): string | null => {
       const def = tweakById.get(id);
-      if (!def?.cssVar) return null;
-      return formatCssValue(def, parseControlValue(def, String(value)));
+      if (!def) return null;
+      const formatted = formatCssValue(def, parseControlValue(def, String(value)));
+      return opFor(def, formatted) ? formatted : null;
     },
     [tweakById],
   );
-  // Apply a "Look": set every drivable referenced tweak's cssVar in bulk (each becomes a local
-  // override the visitor can still adjust). Unknown ids / tweaks without a cssVar are skipped.
+  // Apply a "Look": set every drivable referenced tweak in bulk (each becomes a local override the
+  // visitor can still adjust). Unknown ids / non-drivable tweaks are skipped.
   const applyPreset = useCallback(
     (values: Record<string, ControlValue>) => {
       for (const [id, value] of Object.entries(values)) {
         const def = tweakById.get(id);
-        const css = presetCss(id, value);
-        if (def?.cssVar && css !== null) setTweak(def.cssVar, css);
+        const formatted = presetValue(id, value);
+        const op = def && formatted !== null ? opFor(def, formatted) : null;
+        if (op) setTweak(id, op);
       }
     },
-    [tweakById, presetCss, setTweak],
+    [tweakById, presetValue, setTweak],
   );
   // A Look reads as "active" when every drivable entry it sets currently matches the visitor's
   // overrides — so after applying one (or hand-matching it) the button reflects that state.
   const isPresetActive = useCallback(
     (values: Record<string, ControlValue>): boolean => {
-      const entries = Object.entries(values).filter(([id]) => tweakById.get(id)?.cssVar);
+      const entries = Object.entries(values).filter(([id, value]) => presetValue(id, value) !== null);
       if (entries.length === 0) return false;
-      return entries.every(([id, value]) => overrides[tweakById.get(id)!.cssVar!] === presetCss(id, value));
+      return entries.every(([id, value]) => overrides[id]?.v === presetValue(id, value));
     },
-    [tweakById, overrides, presetCss],
+    [overrides, presetValue],
   );
 
   return (
@@ -363,9 +401,15 @@ export function TweaksOverlay({
                   <TweakRow
                     key={tweak.id}
                     tweak={tweak}
-                    override={tweak.cssVar ? overrides[tweak.cssVar] : undefined}
-                    onChange={(value) => tweak.cssVar && setTweak(tweak.cssVar, formatCssValue(tweak, value))}
-                    onReset={() => tweak.cssVar && resetTweak(tweak.cssVar)}
+                    override={overrides[tweak.id]?.v}
+                    onChange={(value) => {
+                      const op = opFor(tweak, formatCssValue(tweak, value));
+                      if (op) setTweak(tweak.id, op);
+                    }}
+                    onReset={() => {
+                      const op = opFor(tweak, "");
+                      if (op) resetTweak(tweak.id, op);
+                    }}
                   />
                 ))}
               </section>
@@ -379,8 +423,8 @@ export function TweaksOverlay({
             />
             {groups.length === 0 && newCandidates.length === 0 && presetNames.length === 0 ? (
               <p className="text-sm text-muted-foreground">
-                No design tokens exposed, and none found in this share's CSS. Add{" "}
-                <span className="font-mono">tweaks</span> with a <span className="font-mono">cssVar</span> to{" "}
+                No tweaks exposed, and none found in this share's CSS. Add{" "}
+                <span className="font-mono">tweaks</span> (css var, attr, or class) to{" "}
                 <span className="font-mono">see.json</span>.
               </p>
             ) : null}
@@ -528,6 +572,14 @@ function TweakRow({
     override !== undefined ? parseControlValue(tweak, override) : tweak.value ?? defaultForKind(tweak);
   const overridden = override !== undefined;
   const label = tweak.label ?? tweak.id;
+  // What this control drives, shown as a mono caption: the css var, or the attr/class + its selector.
+  const targetLabel = tweak.cssVar
+    ? tweak.cssVar
+    : tweak.attr
+      ? `${tweak.selector ?? ""} [${tweak.attr}]`
+      : tweak.class
+        ? `${tweak.selector ?? ""} .${tweak.class}`
+        : null;
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -545,8 +597,8 @@ function TweakRow({
         ) : null}
       </div>
       <TweakControl tweak={tweak} value={value} onChange={onChange} />
-      {tweak.cssVar ? (
-        <span className="truncate font-mono text-[0.65rem] text-muted-foreground">{tweak.cssVar}</span>
+      {targetLabel ? (
+        <span className="truncate font-mono text-[0.65rem] text-muted-foreground">{targetLabel}</span>
       ) : null}
     </div>
   );
