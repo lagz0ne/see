@@ -40,6 +40,20 @@ describe("content runtime", () => {
     expect(script).toContain("see:clear");
   });
 
+  test("ships an inspector: see:inspect drives it, picks report see:picked over the port", () => {
+    // Inbound command + outbound report are both part of the point-to-point port protocol.
+    expect(script).toContain("see:inspect");
+    expect(script).toContain("see:picked");
+    // Selectors prefer a stable data-see anchor over a positional path so the LLM gets a durable ref.
+    expect(script).toContain("data-see");
+    // Capture is via document-scoped pointer listeners, never a new window 'message' attack surface.
+    expect(script).toContain('addEventListener("click"');
+    expect(script).toContain('addEventListener("mousemove"');
+    expect(script).not.toContain('addEventListener("message"');
+    // Picks are emitted over the same transferred port — not a wildcard window.postMessage.
+    expect(script).toContain("channel.port1.postMessage");
+  });
+
   test("escapes < so a crafted config can never terminate the <script> element", () => {
     const evil = contentRuntimeScript({ id: "x", viewerOrigin: "a</script><b" });
     expect(evil).not.toContain("</script><b");

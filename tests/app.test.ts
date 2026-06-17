@@ -681,14 +681,17 @@ describe("static app share service", () => {
     const rootHtml = await root.text();
     expect(rootHtml).toContain("<style>:root{");
     expect(rootHtml).toContain("--color-primary: #0A84FF");
-    expect(rootHtml).not.toContain("#D97757");
+    // The page-override wins: the shared default is not applied to --color-primary. (Scope the
+    // assertion to the declaration — the injected inspector runtime legitimately uses the same
+    // Blueprint amber for its highlight, which is unrelated to the resolved tweak value.)
+    expect(rootHtml).not.toContain("--color-primary: #D97757");
 
     // Served via the explicit homepage path.
     const explicit = await app.fetch(new Request(`http://share.test/content/${payload.id}/index.html`));
     expect(explicit.status).toBe(200);
     const explicitHtml = await explicit.text();
     expect(explicitHtml).toContain("--color-primary: #0A84FF");
-    expect(explicitHtml).not.toContain("#D97757");
+    expect(explicitHtml).not.toContain("--color-primary: #D97757");
   });
 
   test("Settings PATCH on a bundle rejects pageTweaks with bundle_managed", async () => {

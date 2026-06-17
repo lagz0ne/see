@@ -3,6 +3,7 @@ import {
   AlertTriangleIcon,
   CheckCircle2Icon,
   CopyIcon,
+  CrosshairIcon,
   ExternalLinkIcon,
   FileArchiveIcon,
   EyeIcon,
@@ -66,9 +67,9 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { cn } from "@/lib/utils";
+import { cn, copyToClipboard } from "@/lib/utils";
 import { SettingsPanel } from "./settings/SettingsPanel";
-import { TweaksOverlay, useTweakBridge } from "./settings/TweaksOverlay";
+import { InspectPanel, TweaksOverlay, useTweakBridge } from "./settings/TweaksOverlay";
 
 type StaticShareAppProps = {
   root: HTMLElement;
@@ -235,7 +236,7 @@ function UploadApp({ root }: StaticShareAppProps) {
     if (!result?.viewerUrl) {
       return;
     }
-    await copyText(result.viewerUrl);
+    await copyToClipboard(result.viewerUrl);
     setStatus({ message: "Viewer link copied.", tone: "success" });
   }
 
@@ -466,7 +467,7 @@ function UploadApp({ root }: StaticShareAppProps) {
                       variant="outline"
                       size="icon"
                       onClick={() => {
-                        void copyText(result.editToken);
+                        void copyToClipboard(result.editToken);
                         setStatus({ message: "Edit token copied.", tone: "success" });
                       }}
                     >
@@ -569,8 +570,17 @@ function ViewerApp({ root }: StaticShareAppProps) {
   const [uploadSettings, setUploadSettings] = useState<UploadSettings | null>(null);
   const [currentPage, setCurrentPage] = useState<string | null>(null);
   const [tweaksOpen, setTweaksOpen] = useState(false);
+  const [inspectOpen, setInspectOpen] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const tweakBridge = useTweakBridge(uploadId, iframeRef);
+
+  // Drive the content runtime's inspect mode from whether the inspector panel is actually shown, so
+  // closing it (or hiding the chrome) also tears down the in-iframe highlight + click capture.
+  const { setInspect: setBridgeInspect } = tweakBridge;
+  const inspectActive = inspectOpen && controlsVisible;
+  useEffect(() => {
+    setBridgeInspect(inspectActive);
+  }, [inspectActive, setBridgeInspect]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
@@ -770,7 +780,7 @@ function ViewerApp({ root }: StaticShareAppProps) {
   }
 
   async function copyViewer() {
-    await copyText(viewerUrl);
+    await copyToClipboard(viewerUrl);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1200);
   }
@@ -988,6 +998,15 @@ function ViewerApp({ root }: StaticShareAppProps) {
             >
               <SlidersHorizontalIcon data-icon="inline-start" />
             </TooltipButton>
+            <TooltipButton
+              label="Inspect"
+              variant={inspectOpen ? "default" : "outline"}
+              size="icon-sm"
+              aria-pressed={inspectOpen}
+              onClick={() => setInspectOpen((value) => !value)}
+            >
+              <CrosshairIcon data-icon="inline-start" />
+            </TooltipButton>
             <TooltipButton label={copied ? "Copied" : "Copy link"} variant="outline" size="icon-sm" onClick={copyViewer}>
               <CopyIcon data-icon="inline-start" />
             </TooltipButton>
@@ -1088,6 +1107,15 @@ function ViewerApp({ root }: StaticShareAppProps) {
           revision={resourceRevision}
           bridge={tweakBridge}
           onClose={() => setTweaksOpen(false)}
+        />
+      ) : null}
+
+      {inspectActive ? (
+        <InspectPanel
+          page={resourcePageFromPath(tweakBridge.runtimePath, contentRoot) ?? currentPage}
+          picked={tweakBridge.picked}
+          onClear={tweakBridge.clearPicked}
+          onClose={() => setInspectOpen(false)}
         />
       ) : null}
     </main>
@@ -1593,21 +1621,6 @@ function parseJson(value: string): Record<string, unknown> {
   } catch {
     return {};
   }
-}
-
-async function copyText(value: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(value);
-    return;
-  }
-  const textarea = document.createElement("textarea");
-  textarea.value = value;
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  document.body.append(textarea);
-  textarea.select();
-  document.execCommand("copy");
-  textarea.remove();
 }
 
 function readSavedToken(): string {

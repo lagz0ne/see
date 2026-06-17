@@ -114,3 +114,26 @@ Actions by file type:
 - **HTML** (`.html`/`.htm`, `select` = CSS selector): `setText`/`setHtml`/`replaceWith`/`append`/`prepend` (`value`), `setAttr` (`name`,`value`), `removeAttr` (`name`), `addClass`/`removeClass` (`value`), `remove`.
 - **JSON** (`.json`, `pointer` = RFC 6901; `""` is the whole doc): `set` (`value`; trailing `/-` appends to an array), `insert` (`value`, at index), `append` (`value`, push), `remove`.
 - **CSS** (`.css`, `selectRule` = rule selector text): `setDecl` (`prop`,`value`; adds if absent), `removeDecl` (`prop`), `removeRule`, `addRule` (`selector`, `declarations` object).
+
+---
+
+## Human feedback — the inspector loop
+
+The viewer has an **Inspect** mode: a human hovers the live preview, clicks an element, writes a note, and copies a `see comment` block to paste back to you (the authoring LLM):
+
+```
+see comment · pricing.html
+selector: [data-see="hero.cta"]
+element: a.cta - Get started
+
+make this bigger and use the accent color
+
+— For the authoring LLM: find this element by `selector` on the page above and apply the change. …
+```
+
+- `selector` is a **CSS selector for the named page**, in the same vocabulary as the HTML patch API's `select` field — so you can act on it directly: `{ "file": "pricing.html", "select": "[data-see=\"hero.cta\"]", "action": "setText", "value": "Get started today" }`.
+- `selector` prefers a `data-see` anchor; otherwise it is a positional path (e.g. `nav > a:nth-of-type(2)`), which still works as a `select` but is more brittle.
+
+**Make elements addressable: add `data-see="name"`.** Put a stable `data-see` attribute on every meaningful element you author (`<button data-see="hero.cta">`, `<section data-see="pricing">`). The inspector then reports `[data-see="name"]` instead of a positional path, so human feedback maps to a durable selector that survives layout changes — and you patch the same element later with `select: "[data-see=\"name\"]"`. `data-see` is inert (no styling or behavior); it exists purely as an anchor for inspection + patching.
+
+No inspector state is stored on the server — the comment travels only via the human's clipboard.

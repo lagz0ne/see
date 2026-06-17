@@ -4,7 +4,7 @@ import { uploadRevision, uploadWorkspace } from "./upload-metadata";
 import { contentFrameSrc, viewerUrl } from "./urls";
 import { escapeHtml } from "./lib/html";
 
-const ASSET_VERSION = "20260617-discover-expose";
+const ASSET_VERSION = "20260617-inspector";
 
 export function uploadPage(config: AppConfig): string {
   return htmlDocument(

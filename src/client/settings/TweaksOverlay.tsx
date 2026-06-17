@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { RotateCcw, Trash2, X } from "lucide-react";
+import { Check, Copy, RotateCcw, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
-import { cn } from "@/lib/utils";
+import { cn, copyToClipboard } from "@/lib/utils";
 
 // Mirrors the GET /api/uploads/:id/tweaks payload (see src/app.ts resolveBundleTweaks).
 type ResolvedTweak = {
@@ -112,9 +112,11 @@ export function useTweakBridge(uploadId: string, iframeRef: RefObject<HTMLIFrame
   const storageKey = `${STORE_PREFIX}${uploadId}`;
   const [overrides, setOverrides] = useState<Overrides>(() => readOverrides(storageKey));
   const [runtimePath, setRuntimePath] = useState<string | null>(null);
+  const [picked, setPicked] = useState<{ selector: string; label: string } | null>(null);
   const overridesRef = useRef(overrides);
   overridesRef.current = overrides;
   const portRef = useRef<MessagePort | null>(null);
+  const inspectRef = useRef(false);
 
   useEffect(() => {
     function onMessage(event: MessageEvent) {
@@ -125,18 +127,34 @@ export function useTweakBridge(uploadId: string, iframeRef: RefObject<HTMLIFrame
       // The id check filters cross-share / accidental messages, but it is NOT a security boundary:
       // uploaded JS shares this opaque origin + contentWindow and knows the share id, so it can spoof
       // see:hello (no in-document handshake can be unspoofable — any nonce the runtime can read, page
-      // code can read too). That is acceptable because the bridge is one-way (viewer -> content) and
-      // carries only cosmetic cssVar overrides the content already sees applied to its own :root —
-      // there is no viewer-private data to leak, and we never act on inbound messages from the port.
+      // code can read too). That is acceptable because the bridge carries only cosmetic cssVar
+      // overrides the content already sees on its own :root, and the one inbound message we accept
+      // (see:picked) is treated as untrusted bounded TEXT (never eval'd) — see port.onmessage below.
       if (!data || data.type !== "see:hello" || data.id !== uploadId) return;
       const port = event.ports[0];
       if (!port) return;
+      // Neutralize the prior page's port before adopting the new one, so a late see:picked from the
+      // old (closing) runtime can't repopulate the pick after we reset it for the fresh page below.
+      portRef.current?.close();
       portRef.current = port;
+      // The content runtime is UNTRUSTED. The only inbound message is an inspector "picked" report;
+      // clamp its strings and render them via React (auto-escaped) — the worst a hostile page can do
+      // is prefill its own comment composer with bounded text.
+      port.onmessage = (e: MessageEvent) => {
+        const m = e.data as { type?: string; selector?: unknown; label?: unknown } | null;
+        if (!m || m.type !== "see:picked" || typeof m.selector !== "string") return;
+        setPicked({
+          selector: m.selector.slice(0, 500),
+          label: typeof m.label === "string" ? m.label.slice(0, 200) : "",
+        });
+      };
       // Track the iframe's actual page (it re-announces on every navigation) so the overlay shows
       // the page that is actually being previewed, not a stale viewer-selector value.
       if (typeof data.path === "string") setRuntimePath(data.path);
-      // Replay the visitor's overrides so the freshly loaded page reflects them before they interact.
+      setPicked(null); // a fresh page → drop any stale pick from the previous one
+      // Replay the visitor's overrides + restore inspect mode so both survive in-iframe navigation.
       port.postMessage({ type: "see:state", vars: overridesRef.current });
+      port.postMessage({ type: "see:inspect", on: inspectRef.current });
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
@@ -174,7 +192,14 @@ export function useTweakBridge(uploadId: string, iframeRef: RefObject<HTMLIFrame
     persist({});
   }, [persist]);
 
-  return { overrides, setTweak, resetTweak, clearAll, runtimePath };
+  const setInspect = useCallback((on: boolean) => {
+    inspectRef.current = on;
+    portRef.current?.postMessage({ type: "see:inspect", on });
+    if (!on) setPicked(null);
+  }, []);
+  const clearPicked = useCallback(() => setPicked(null), []);
+
+  return { overrides, setTweak, resetTweak, clearAll, runtimePath, picked, setInspect, clearPicked };
 }
 
 type Bridge = ReturnType<typeof useTweakBridge>;
@@ -313,6 +338,117 @@ export function TweaksOverlay({
           Clear
         </Button>
       </footer>
+    </aside>
+  );
+}
+
+// Compose the clipboard payload for a picked element. Plain, delimited text so the LLM that authored
+// the content can locate the element (page + selector, in the same selector vocabulary the inspector
+// reports) and act on the note. Kept human-readable so the user can eyeball it before pasting.
+function buildInspectComment(
+  page: string | null,
+  picked: { selector: string; label: string },
+  note: string,
+): string {
+  const lines = [`see comment · ${page ?? "(unknown page)"}`, `selector: ${picked.selector}`];
+  if (picked.label) lines.push(`element: ${picked.label}`);
+  lines.push("", note.trim() || "(describe the change you want)", "");
+  // A trailing instruction so the authoring LLM can act on this directly: the selector is already in
+  // the HTML patch API's `select` vocabulary for the named page.
+  lines.push(
+    "— For the authoring LLM: find this element by `selector` on the page above and apply the change. " +
+      '`selector` is a CSS selector (the HTML patch API\'s `select`); add data-see="name" to the markup for a stable anchor.',
+  );
+  return lines.join("\n");
+}
+
+// The inspector half of the comment -> clipboard -> LLM loop. Inspect mode lives in the content
+// runtime (highlight + click-to-pick); this panel just renders whatever element the runtime reported
+// (UNTRUSTED text, already bounded by the bridge and escaped by React) and lets the user attach a
+// note and copy a payload to hand back to the LLM. No server write — purely a hand-off aid.
+export function InspectPanel({
+  page,
+  picked,
+  onClear,
+  onClose,
+}: {
+  page: string | null;
+  picked: { selector: string; label: string } | null;
+  onClear: () => void;
+  onClose: () => void;
+}) {
+  const [note, setNote] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  // Reset the composer whenever a different element is picked.
+  const selector = picked?.selector ?? null;
+  useEffect(() => {
+    setNote("");
+    setCopied(false);
+  }, [selector]);
+
+  // Self-clearing "Copied" flash, cleaned up on unmount / re-copy so it never setState a closed panel.
+  useEffect(() => {
+    if (!copied) return;
+    const t = window.setTimeout(() => setCopied(false), 1400);
+    return () => window.clearTimeout(t);
+  }, [copied]);
+
+  async function copy() {
+    if (!picked) return;
+    await copyToClipboard(buildInspectComment(page, picked, note));
+    setCopied(true);
+  }
+
+  return (
+    <aside
+      aria-label="Inspector"
+      className="pointer-events-auto fixed bottom-3 left-3 z-40 flex w-80 max-w-[calc(100vw-1.5rem)] flex-col overflow-hidden rounded-lg border bg-card text-card-foreground shadow-lg"
+    >
+      <header className="flex items-center justify-between gap-2 border-b px-3 py-2">
+        <div className="flex min-w-0 flex-col">
+          <span className="font-mono text-[0.65rem] tracking-[0.12em] text-muted-foreground uppercase">Inspect</span>
+          {page ? <span className="truncate font-mono text-xs text-muted-foreground">{page}</span> : null}
+        </div>
+        <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close inspector">
+          <X />
+        </Button>
+      </header>
+
+      <div className="flex min-h-0 flex-col gap-3 px-3 py-3">
+        {!picked ? (
+          <p className="font-mono text-xs leading-relaxed text-muted-foreground">
+            Hover the preview and click an element to comment on it. Add{" "}
+            <span className="text-foreground">data-see="name"</span> to your markup for stable references.
+          </p>
+        ) : (
+          <>
+            <div className="flex flex-col gap-1">
+              {picked.label ? <p className="truncate text-sm font-medium">{picked.label}</p> : null}
+              <code className="rounded bg-muted px-2 py-1 font-mono text-[0.7rem] break-all text-muted-foreground">
+                {picked.selector}
+              </code>
+            </div>
+            <textarea
+              value={note}
+              autoFocus
+              aria-label="Comment for the LLM"
+              placeholder="Describe the change you want…"
+              onChange={(event) => setNote(event.currentTarget.value)}
+              className="h-24 w-full resize-y rounded-md border bg-muted/30 p-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40"
+            />
+            <div className="flex items-center gap-2">
+              <Button size="sm" className="flex-1" onClick={() => void copy()}>
+                {copied ? <Check data-icon="inline-start" /> : <Copy data-icon="inline-start" />}
+                {copied ? "Copied" : "Copy for LLM"}
+              </Button>
+              <Button size="sm" variant="ghost" onClick={onClear}>
+                Clear
+              </Button>
+            </div>
+          </>
+        )}
+      </div>
     </aside>
   );
 }
